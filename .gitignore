@@ -1,4 +1,5 @@
-# Cutzo's own Python folder and per-computer settings
+# Cutzo's own Python, its Python folder and per-computer settings
+.python/
 .venv/
 settings.json
 

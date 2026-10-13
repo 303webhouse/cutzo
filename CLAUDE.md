@@ -84,9 +84,14 @@ Environment variables: `CUTZO_HOME` (library folder), `CUTZO_PORT`, `CUTZO_SPEED
 - Windows, Claude desktop app (Microsoft Store/MSIX build) whose settings file is
   `%APPDATA%\Claude\claude_desktop_config.json` (other connectors there: tradingview,
   railway-mcp-server; Desktop Commander and PDF Tools are extensions).
-- uv 0.11 at `%USERPROFILE%\.local\bin\uv.exe` with managed CPython 3.12 and 3.14.
-  System Python is the Microsoft Store build: never build Cutzo's .venv from it (it silently
-  redirects AppData writes, so Claude would never see the connector). Setup rebuilds such a .venv.
+- uv 0.11 at `%USERPROFILE%\.local\bin\uv.exe`. Setup installs Cutzo's own Python into
+  `F:\Cutzo\app\.python` (UV_PYTHON_INSTALL_DIR) and builds `.venv` from it.
+- AppData traps: commands run through Desktop Commander run INSIDE the Claude app's MSIX
+  container, where writes to AppData go to a private copy
+  (`%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\...`) that the desktop shortcut and
+  Task Scheduler can't see. `Roaming\Claude` is the exception (real). So never put anything
+  Cutzo needs at runtime in AppData; keep it under F:\Cutzo. The Microsoft Store system Python
+  has the same kind of redirection: never build Cutzo's .venv from it.
 - git 2.53 and gh (signed in as 303webhouse). Library `F:\Cutzo`, app `F:\Cutzo\app`.
 - Free space: C: about 75 GB (never write media there), F: about 710 GB.
 

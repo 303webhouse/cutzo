@@ -68,15 +68,17 @@ function Get-Port {
     return 8765
 }
 
-function Test-VenvHealthy([string]$VenvDir) {
-    # A usable .venv has python.exe and pythonw.exe, runs Python 3.12, and is not built on the
-    # Microsoft Store Python (which silently redirects writes to Claude's settings).
+function Test-VenvHealthy([string]$VenvDir, [string]$PythonHome) {
+    # A usable .venv has python.exe and pythonw.exe, runs Python 3.12, and is built on the
+    # Python inside the Cutzo folder. A Python kept in AppData can be invisible to Windows
+    # outside the app that installed it (the Claude app and the Microsoft Store Python both
+    # keep private copies of AppData), and then the desktop shortcut can't start Cutzo.
     if (-not (Test-Path -LiteralPath (Join-Path $VenvDir "Scripts\python.exe"))) { return $false }
     if (-not (Test-Path -LiteralPath (Join-Path $VenvDir "Scripts\pythonw.exe"))) { return $false }
     $cfg = Join-Path $VenvDir "pyvenv.cfg"
     if (-not (Test-Path -LiteralPath $cfg)) { return $false }
     $text = Get-Content -LiteralPath $cfg -Raw
-    if ($text -match "WindowsApps") { return $false }
+    if (-not $text.ToLower().Contains($PythonHome.ToLower())) { return $false }
     if ($text -notmatch "(?m)^\s*(version|version_info)\s*=\s*3\.12\.") { return $false }
     return $true
 }
@@ -113,7 +115,10 @@ Good "Using uv at $Uv"
 $Venv = Join-Path $AppDir ".venv"
 $VenvPy = Join-Path $Venv "Scripts\python.exe"
 $VenvPyw = Join-Path $Venv "Scripts\pythonw.exe"
-if (-not (Test-VenvHealthy $Venv)) {
+# Cutzo's own copy of Python lives in the Cutzo folder, where every program can see it.
+$PythonHome = Join-Path $AppDir ".python"
+$env:UV_PYTHON_INSTALL_DIR = $PythonHome
+if (-not (Test-VenvHealthy $Venv $PythonHome)) {
     if (Test-Path -LiteralPath $Venv) { Note "Cutzo's Python folder needs rebuilding; doing that now." }
     $code = Invoke-Tool $Uv @("venv", "--clear", "--python", "3.12", "--python-preference", "only-managed", $Venv)
     if ($code -ne 0) {
