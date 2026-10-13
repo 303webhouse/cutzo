@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Cutzo</title>
   <link rel="icon" href="/static/cutzo-mark.svg" type="image/svg+xml">
+  <script src="/static/js/theme.js"></script>
   <link rel="stylesheet" href="/static/app.css">
   <script type="module" src="/static/js/app.js"></script>
 </head>
@@ -27,6 +28,10 @@
         <h2 class="dock-title">Running</h2>
         <div id="jobs"><p class="dock-empty">Nothing running.</p></div>
       </section>
+      <button class="theme-toggle" id="theme-toggle" type="button">
+        <span class="when-dark"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.6" fill="currentColor"/><path d="M10 1.8v2.4M10 15.8v2.4M1.8 10h2.4M15.8 10h2.4M4.2 4.2l1.7 1.7M14.1 14.1l1.7 1.7M4.2 15.8l1.7-1.7M14.1 5.9l1.7-1.7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span class="label">Switch to light mode</span></span>
+        <span class="when-light"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16.4 12.7A7 7 0 0 1 7.3 3.6a7 7 0 1 0 9.1 9.1z" fill="currentColor"/></svg><span class="label">Switch to dark mode</span></span>
+      </button>
       <p class="rail-foot" id="engine-status">Connecting to Cutzo&hellip;</p>
     </nav>
     <div class="stage-area">

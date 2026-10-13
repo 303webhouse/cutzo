@@ -13,6 +13,21 @@ def test_health_and_screens(client):
     assert client.get("/static/fonts/big-shoulders-display-latin-800-normal.woff2").status_code == 200
 
 
+def test_theme_is_picked_before_the_page_draws(client):
+    # theme.js must be a plain (blocking) script in <head>, ahead of the styles, so a dark
+    # screen never flashes light first. It also has to work without the module scripts.
+    html = client.get("/").text
+    head = html.split("</head>", 1)[0]
+    assert '<script src="/static/js/theme.js"></script>' in head
+    assert head.index("theme.js") < head.index("app.css")
+    theme = client.get("/static/js/theme.js")
+    assert theme.status_code == 200 and theme.headers["cache-control"] == "no-cache"
+    assert "import " not in theme.text and "export " not in theme.text
+    css = client.get("/static/app.css").text
+    assert ':root[data-theme="dark"]' in css and "color-scheme: dark" in css
+    assert 'id="theme-toggle"' in html
+
+
 def test_only_this_computer(client, cutzo):
     from fastapi.testclient import TestClient
 

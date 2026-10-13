@@ -1,10 +1,24 @@
-// Settings: where Cutzo keeps things, a self-test, the Claude connector, and quitting.
+// Settings: dark or light, where Cutzo keeps things, a self-test, the Claude connector,
+// and quitting.
 
 import { api } from "../api.js";
-import { h, add, clear, toast, toastError, confirmDialog } from "../ui.js";
+import { h, add, clear, toast, toastError, confirmDialog, themeChoice, setThemeChoice } from "../ui.js";
+
+const THEMES = [
+  ["dark", "Dark", "Dark screens. Easier on the eyes in a dim room."],
+  ["light", "Light", "Light pages, like paper."],
+  ["system", "Match Windows", "Follows the light or dark setting in Windows."],
+];
 
 export async function render(main, params, ctx) {
   const info = await api("/api/health");
+  const themeInputs = THEMES.map(([value]) =>
+    h("input", { type: "radio", name: "theme", value, checked: themeChoice() === value, onchange: () => setThemeChoice(value) }));
+  // The side-bar switch can change the theme while this page is open.
+  const syncTheme = () => {
+    for (const input of themeInputs) input.checked = input.value === themeChoice();
+  };
+  window.addEventListener("cutzo-theme", syncTheme);
   const checks = h("ul", { class: "checks" });
   const runTest = async () => {
     try {
@@ -27,7 +41,13 @@ export async function render(main, params, ctx) {
     h("header", { class: "page-head" },
       h("div", {},
         h("h1", { class: "page-title" }, "Settings"),
-        h("p", { class: "lede" }, "Where Cutzo keeps its files, a check that everything works, and the Claude connector."))),
+        h("p", { class: "lede" }, "How Cutzo looks, where it keeps its files, a check that everything works, and the Claude connector."))),
+    h("section", { class: "panel" },
+      h("h3", { id: "appearance-title" }, "Appearance"),
+      h("p", { class: "muted" }, "Cutzo remembers your choice. There's also a quick switch at the bottom of the side bar."),
+      h("div", { class: "choice-row", role: "radiogroup", "aria-labelledby": "appearance-title" },
+        THEMES.map(([, label, note], i) =>
+          h("label", { class: "choice" }, themeInputs[i], h("span", {}, h("b", {}, label), h("span", { class: "small muted" }, note)))))),
     h("div", { class: "two-col" },
       h("section", { class: "panel" },
         h("h3", {}, "This computer"),
@@ -93,6 +113,7 @@ export async function render(main, params, ctx) {
         }, "Quit Cutzo"))),
   ]);
   await runTestSilently();
+  return { destroy: () => window.removeEventListener("cutzo-theme", syncTheme) };
 
   async function runTestSilently() {
     // Show the last results without logging a new self-test on every visit.

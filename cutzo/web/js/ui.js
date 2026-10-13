@@ -161,6 +161,21 @@ export function confirmDialog({ title, text, confirm = "Continue", danger = fals
   });
 }
 
+// ----------------------------------------------------------------- theme
+// js/theme.js picks dark or light before the page draws. The choice is "dark", "light"
+// or "system" (match Windows); every change fires a "cutzo-theme" event on window.
+export function themeChoice() {
+  return window.cutzoTheme ? window.cutzoTheme.get() : "dark";
+}
+
+export function setThemeChoice(choice) {
+  if (window.cutzoTheme) window.cutzoTheme.set(choice);
+}
+
+export function isDark() {
+  return document.documentElement.getAttribute("data-theme") === "dark";
+}
+
 export function showColor(showId) {
   return showId === "the-dig" ? "var(--dig)" : showId === "the-new-heretics" ? "var(--tnh)" : "var(--ink)";
 }

@@ -2,7 +2,7 @@
 // (so changes Claude makes show up here within a couple of seconds).
 
 import { api } from "./api.js";
-import { h, clear, toast, toastError } from "./ui.js";
+import { h, clear, toast, toastError, isDark, setThemeChoice } from "./ui.js";
 import * as episodes from "./views/episodes.js";
 import * as episode from "./views/episode.js";
 import * as shows from "./views/shows.js";
@@ -203,6 +203,8 @@ function scheduleRefresh() {
 }
 
 // --------------------------------------------------------------- startup
+// The side-bar switch flips between dark and light (its label comes from the CSS).
+document.getElementById("theme-toggle").addEventListener("click", () => setThemeChoice(isDark() ? "light" : "dark"));
 window.addEventListener("hashchange", render);
 render();
 poll();

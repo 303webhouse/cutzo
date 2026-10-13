@@ -61,6 +61,10 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
 - The screens redraw only for changes made elsewhere (Claude, finished jobs) and keep
   anything half-typed (paths, chapter titles, export ticks, the "replace?" question).
 - No CDNs or web fonts from the internet; the app must work offline.
+- Two looks, dark (the default) and light: `js/theme.js` (a plain script in `<head>`) sets
+  `data-theme` on `<html>` before the page draws, from the browser-saved choice (dark, light or
+  match Windows). In `app.css` use the named colours (`var(--ink)` and so on), never raw ones,
+  except on the deck, which is dark in both looks. Check new screens in both looks.
 - Windows scripts stay ASCII with CRLF line endings (`.gitattributes` keeps them as committed).
 
 ## Phase 1 pretend parts and where Phase 2 plugs in

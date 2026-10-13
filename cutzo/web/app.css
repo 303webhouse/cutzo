@@ -1,4 +1,7 @@
-/* Cutzo: a tape deck (dark) above a script you mark up with a red grease pencil (paper). */
+/* Cutzo: a tape deck (dark) above a script you mark up with a red grease pencil (paper).
+   Two looks share these rules: light (the :root colours) and dark (the overrides below it).
+   js/theme.js picks one before the page draws. Use the named colours, never raw ones, so
+   both looks stay right. The deck is the darkest part in both. */
 
 @font-face { font-family: "Atkinson Hyperlegible Next"; src: url("fonts/atkinson-hyperlegible-next-latin-400-normal.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
 @font-face { font-family: "Atkinson Hyperlegible Next"; src: url("fonts/atkinson-hyperlegible-next-latin-400-italic.woff2") format("woff2"); font-weight: 400; font-style: italic; font-display: swap; }
@@ -7,6 +10,7 @@
 @font-face { font-family: "Big Shoulders Display"; src: url("fonts/big-shoulders-display-latin-800-normal.woff2") format("woff2"); font-weight: 800; font-style: normal; font-display: swap; }
 
 :root {
+  color-scheme: light;
   --deck: #22262e;
   --deck-raised: #2d323c;
   --deck-line: #3c424e;
@@ -30,7 +34,16 @@
   --warn-wash: #fbf0d3;
   --dig: #d9a441;
   --tnh: #ff6a3d;
-  --text: "Atkinson Hyperlegible Next", "Segoe UI", system-ui, sans-serif;
+  --marker-strong: #b3221a;
+  --on-ink: #ffffff;
+  --ink-hover: #000000;
+  --hover: rgba(29, 32, 39, 0.06);
+  --halo: rgba(29, 32, 39, 0.12);
+  --cut-text: #9da1a9;
+  --select: rgba(224, 52, 43, 0.22);
+  --practice-line: #ecd9a6;
+  --backdrop: rgba(20, 22, 27, 0.55);
+  --text:"Atkinson Hyperlegible Next", "Segoe UI", system-ui, sans-serif;
   --display: "Big Shoulders Display", "Arial Narrow", "Segoe UI", sans-serif;
   --s-2: 12px;
   --s-1: 13.5px;
@@ -45,6 +58,40 @@
   --r-lg: 12px;
   --focus: 0 0 0 3px rgba(101, 83, 216, 0.5);
   --pencil: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 20' preserveAspectRatio='none'%3E%3Cpath d='M1 12.2 C 30 10.6, 62 11.4, 99 9.2' fill='none' stroke='%23e0342b' stroke-width='3.4' stroke-linecap='round' vector-effect='non-scaling-stroke'/%3E%3C/svg%3E");
+}
+
+/* Dark mode: night paper, light ink, and an even darker deck. Text colours keep at least
+   4.5:1 contrast on the surfaces they sit on. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --deck: #0e1013;
+  --deck-raised: #1c1f25;
+  --deck-line: #2f343e;
+  --paper: #16181d;
+  --sheet: #1d2026;
+  --ink: #e6e8eb;
+  --ink-soft: #a7adb8;
+  --rule: #2b2f37;
+  --rule-strong: #3b414c;
+  --marker-ink: #ff8f86;
+  --marker-strong: #c42b23;
+  --marker-wash: rgba(239, 75, 66, 0.18);
+  --tally: #3cc184;
+  --tally-wash: rgba(60, 193, 132, 0.16);
+  --claude: #a596ff;
+  --claude-wash: rgba(165, 150, 255, 0.16);
+  --now: #27406e;
+  --warn-ink: #f2cf7a;
+  --warn-wash: #2a2213;
+  --on-ink: #16181d;
+  --ink-hover: #ffffff;
+  --hover: rgba(255, 255, 255, 0.07);
+  --halo: rgba(255, 255, 255, 0.14);
+  --cut-text: #6f7681;
+  --select: rgba(239, 75, 66, 0.35);
+  --practice-line: #4a3c17;
+  --backdrop: rgba(0, 0, 0, 0.62);
+  --focus: 0 0 0 3px rgba(165, 150, 255, 0.6);
 }
 
 * { box-sizing: border-box; }
@@ -106,6 +153,26 @@ a { color: inherit; }
 .job .link { background: none; border: 0; color: var(--deck-muted); padding: 0; cursor: pointer; text-decoration: underline; font-size: var(--s-2); }
 .rail-foot { font-size: var(--s-2); color: var(--deck-muted); margin: 14px 0 0; }
 .rail-foot.down { color: #ffb4ae; }
+.theme-toggle {
+  position: relative;
+  display: flex;
+  width: 100%;
+  margin: 12px 0 0;
+  padding: 8px 12px;
+  background: none;
+  border: 0;
+  border-radius: var(--r-md);
+  color: var(--deck-muted);
+  font-weight: 700;
+  font-size: var(--s-1);
+  cursor: pointer;
+  text-align: left;
+}
+.theme-toggle:hover { color: var(--deck-text); background: var(--deck-raised); }
+.theme-toggle > span { display: inline-flex; align-items: center; gap: 8px; }
+.theme-toggle svg { width: 16px; height: 16px; flex: none; }
+:root[data-theme="dark"] .theme-toggle .when-light,
+:root:not([data-theme="dark"]) .theme-toggle .when-dark { display: none; }
 
 .stage-area { min-width: 0; display: flex; flex-direction: column; }
 .practice {
@@ -114,7 +181,7 @@ a { color: inherit; }
   background: var(--warn-wash);
   color: var(--warn-ink);
   font-size: var(--s-1);
-  border-bottom: 1px solid #ecd9a6;
+  border-bottom: 1px solid var(--practice-line);
 }
 main { padding: 28px 32px 72px; outline: none; width: 100%; max-width: 1440px; }
 
@@ -145,12 +212,12 @@ p { margin: 0 0 10px; }
   white-space: nowrap;
 }
 .btn:hover { border-color: var(--ink-soft); }
-.btn-primary { background: var(--ink); border-color: var(--ink); color: #fff; }
-.btn-primary:hover { background: #000; border-color: #000; }
+.btn-primary { background: var(--ink); border-color: var(--ink); color: var(--on-ink); }
+.btn-primary:hover { background: var(--ink-hover); border-color: var(--ink-hover); }
 .btn-cut { background: var(--marker); border-color: var(--marker); color: #fff; }
-.btn-cut:hover { background: var(--marker-ink); border-color: var(--marker-ink); }
+.btn-cut:hover { background: var(--marker-strong); border-color: var(--marker-strong); }
 .btn-quiet { background: transparent; border-color: transparent; color: var(--ink-soft); padding: 7px 9px; }
-.btn-quiet:hover { color: var(--ink); background: rgba(29, 32, 39, 0.06); border-color: transparent; }
+.btn-quiet:hover { color: var(--ink); background: var(--hover); border-color: transparent; }
 .btn-small { padding: 6px 10px; font-size: var(--s-1); }
 .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
 .btn svg { width: 16px; height: 16px; flex: none; }
@@ -221,9 +288,9 @@ p { margin: 0 0 10px; }
 }
 .stages .mark svg { width: 12px; height: 12px; }
 .stages .done { color: var(--ink); }
-.stages .done .mark { background: var(--tally); border-color: var(--tally); color: #fff; }
+.stages .done .mark { background: var(--tally); border-color: var(--tally); color: var(--sheet); }
 .stages .current, .stages .ready { color: var(--ink); }
-.stages .current .mark, .stages .ready .mark { border-color: var(--ink); box-shadow: 0 0 0 3px rgba(29, 32, 39, 0.12); }
+.stages .current .mark, .stages .ready .mark { border-color: var(--ink); box-shadow: 0 0 0 3px var(--halo); }
 .stages .running .mark { border-color: var(--claude); border-style: dashed; animation: spin 2.4s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .next-step {
@@ -312,10 +379,10 @@ p { margin: 0 0 10px; }
 .para-time:hover { color: var(--ink); text-decoration: underline; }
 .words { font-size: var(--s1); line-height: 1.8; max-width: 68ch; margin: 0; }
 .w { border-radius: 3px; cursor: pointer; padding: 1px 0; }
-.w:hover { background: rgba(29, 32, 39, 0.07); }
+.w:hover { background: var(--hover); }
 .w.now { background: var(--now); box-shadow: 0 0 0 2px var(--now); }
 .cut-run {
-  color: #9da1a9;
+  color: var(--cut-text);
   background-image: var(--pencil);
   background-repeat: no-repeat;
   background-size: 100% 100%;
@@ -326,7 +393,7 @@ p { margin: 0 0 10px; }
 .cut-run:hover { background-color: var(--marker-wash); color: var(--ink-soft); }
 .cut-run.fresh { animation: pencil 0.45s ease-out both; }
 @keyframes pencil { from { background-size: 0% 100%; } to { background-size: 100% 100%; } }
-.words ::selection { background: rgba(224, 52, 43, 0.22); }
+.words::selection, .words ::selection { background: var(--select); }
 .script-tip { font-size: var(--s-1); color: var(--ink-soft); border-top: 1px solid var(--rule); padding-top: 12px; margin: 6px 0 0; }
 
 .float-bar {
@@ -420,7 +487,7 @@ table.grid { width: 100%; border-collapse: collapse; }
 .facts dd { margin: 0; }
 .filters { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 18px; }
 .filters button { border: 1px solid var(--rule-strong); background: var(--sheet); border-radius: 999px; padding: 7px 13px; font-weight: 700; cursor: pointer; font-size: var(--s-1); }
-.filters button[aria-pressed="true"] { background: var(--ink); color: #fff; border-color: var(--ink); }
+.filters button[aria-pressed="true"] { background: var(--ink); color: var(--on-ink); border-color: var(--ink); }
 table.kit-table { table-layout: fixed; }
 .kit-table col.c-file { width: 40%; }
 .kit-table col.c-use { width: 18%; }
@@ -473,12 +540,20 @@ table.kit-table { table-layout: fixed; }
 @keyframes toast-in { from { transform: translateY(8px); opacity: 0; } }
 
 /* ------------------------------------------------------------ modal */
-.modal-backdrop { position: fixed; inset: 0; background: rgba(20, 22, 27, 0.55); display: grid; place-items: center; z-index: 60; padding: 16px; }
+.modal-backdrop { position: fixed; inset: 0; background: var(--backdrop); display: grid; place-items: center; z-index: 60; padding: 16px; }
 .modal { background: var(--paper); border-radius: var(--r-lg); width: min(600px, 100%); max-height: 92vh; overflow: auto; padding: 24px 26px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35); }
 .modal h2 { font: 800 var(--s4)/1 var(--display); margin: 0 0 6px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
 .found-list { margin: 8px 0 0; padding: 0; list-style: none; max-height: 180px; overflow: auto; border-top: 1px solid var(--rule); font-size: var(--s-1); }
 .found-list li { padding: 6px 0; border-bottom: 1px solid var(--rule); display: flex; justify-content: space-between; gap: 10px; }
+
+/* --------------------------------------------------------- dark mode */
+/* Dark surfaces sit close together, so they get thin edges to stay apart. */
+:root[data-theme="dark"] .rail { box-shadow: inset -1px 0 0 var(--deck-line); }
+:root[data-theme="dark"] .deck { box-shadow: inset 0 0 0 1px var(--deck-line); }
+:root[data-theme="dark"] .float-bar { box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--deck-line); }
+:root[data-theme="dark"] .toast { box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--deck-line); }
+:root[data-theme="dark"] .modal { box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px var(--rule-strong); }
 
 /* -------------------------------------------------------- responsive */
 @media (max-width: 1180px) {
@@ -493,8 +568,11 @@ table.kit-table { table-layout: fixed; }
   .nav { display: flex; overflow-x: auto; flex: 1 1 auto; min-width: 0; }
   .nav a { padding: 8px 10px; white-space: nowrap; }
   .nav a[aria-current="page"] { box-shadow: inset 0 -3px 0 var(--marker); }
-  .dock { margin-top: 0; border-top: 0; padding-top: 0; width: 100%; }
+  .dock { margin-top: 0; border-top: 0; padding-top: 0; width: 100%; order: 3; }
   .dock-title, .dock-empty, .rail-foot { display: none; }
+  .theme-toggle { width: auto; margin: 0; padding: 8px 10px; order: 2; }
+  .theme-toggle .label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  :root[data-theme="dark"] .rail { box-shadow: inset 0 -1px 0 var(--deck-line); }
   main { padding: 20px 16px 60px; }
   .practice { padding: 8px 16px; }
   .deck { grid-template-columns: minmax(0, 1fr); }
