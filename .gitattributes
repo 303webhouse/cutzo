@@ -1,0 +1,8 @@
+# Windows scripts keep CRLF line endings exactly as committed.
+*.bat -text
+*.ps1 -text
+# Binary files
+*.woff2 binary
+*.ico binary
+*.png binary
+*.wav binary

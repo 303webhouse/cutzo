@@ -1,0 +1,17 @@
+# Cutzo's own Python folder and per-computer settings
+.venv/
+settings.json
+
+# Python leftovers
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# OS clutter
+.DS_Store
+Thumbs.db
+desktop.ini

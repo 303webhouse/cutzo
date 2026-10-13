@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cutzo</title>
+  <link rel="icon" href="/static/cutzo-mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <script type="module" src="/static/js/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#view">Skip to content</a>
+  <div class="shell">
+    <nav class="rail" aria-label="Cutzo">
+      <a class="brand" href="#/" aria-label="Cutzo home">
+        <img src="/static/cutzo-mark.svg" alt="" width="34" height="34">
+        <span class="wordmark">Cutzo</span>
+      </a>
+      <ul class="nav">
+        <li><a href="#/" data-nav="episodes">Episodes</a></li>
+        <li><a href="#/shows" data-nav="shows">Shows</a></li>
+        <li><a href="#/kit" data-nav="kit">Show kit</a></li>
+        <li><a href="#/activity" data-nav="activity">Activity<span class="nav-dot" id="activity-dot" hidden></span></a></li>
+        <li><a href="#/settings" data-nav="settings">Settings</a></li>
+      </ul>
+      <section class="dock" aria-label="Running jobs" aria-live="polite">
+        <h2 class="dock-title">Running</h2>
+        <div id="jobs"><p class="dock-empty">Nothing running.</p></div>
+      </section>
+      <p class="rail-foot" id="engine-status">Connecting to Cutzo&hellip;</p>
+    </nav>
+    <div class="stage-area">
+      <p class="practice" id="practice-banner">Practice mode: these are sample episodes, and nothing here touches your real files.</p>
+      <main id="view" tabindex="-1"></main>
+    </div>
+  </div>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <div class="modal-root" id="modal-root"></div>
+</body>
+</html>

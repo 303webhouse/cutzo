@@ -1,0 +1,383 @@
+// One episode: where it stands, the next step, and tabs for Review, Recordings,
+// Show kit and Export.
+
+import { api, epPath } from "../api.js";
+import { h, add, clear, icons, fmtDur, fmtSize, plural, toast, toastError, confirmDialog, showColor, relTime } from "../ui.js";
+import { nextAction, statusWord } from "./episodes.js";
+import { mountReview } from "./review.js";
+
+const TABS = [
+  { key: "review", label: "Review" },
+  { key: "recordings", label: "Recordings" },
+  { key: "kit", label: "Show kit" },
+  { key: "export", label: "Export" },
+];
+
+export async function render(main, params, ctx) {
+  let ep = await api(epPath(params.id));
+  const built = () => ep.stages.find((s) => s.key === "auto_edit").status === "done";
+  let tab = params.tab || (built() ? "review" : "recordings");
+  if (!TABS.some((t) => t.key === tab)) tab = "review";
+
+  const headBox = h("div", {});
+  const tabsBox = h("nav", { class: "tabs", "aria-label": "Episode sections" });
+  const body = h("div", {});
+  add(main, [headBox, tabsBox, body]);
+  let review = null;
+  let destroyed = false;
+  // Things you are in the middle of typing or choosing survive live refreshes.
+  const draft = { paths: "", picks: null, confirm: null };
+
+  const view = {
+    async refresh() {
+      if (destroyed) return;
+      try {
+        ep = await api(epPath(ep.id));
+      } catch (err) {
+        if (err.status === 404) ctx.go("#/");
+        return;
+      }
+      drawHead();
+      if (tab === "review" && review) await review.refresh(ep);
+      else drawTab();
+    },
+    async tick(jobs) {
+      const mine = jobs.filter((j) => j.episode === ep.id);
+      if (!mine.length || destroyed) return;
+      main.querySelectorAll("[data-job-progress]").forEach((el) => {
+        const job = mine.find((j) => j.kind === el.dataset.jobProgress);
+        if (!job) return;
+        const pct = Math.round(job.progress * 100);
+        el.querySelector(".bar > span").style.width = `${pct}%`;
+        el.querySelector("p").textContent = `${job.step || "Working"} (${pct}%)`;
+      });
+      // Steps tick off one by one during a build; redraw the header when they change.
+      try {
+        const fresh = await api(epPath(ep.id));
+        if (!destroyed && JSON.stringify(fresh.stages) !== JSON.stringify(ep.stages)) {
+          ep = fresh;
+          drawHead();
+        }
+      } catch {
+        /* the next poll tries again */
+      }
+    },
+    destroy() {
+      destroyed = true;
+      if (review) review.destroy();
+    },
+  };
+
+  async function act(fn, success) {
+    try {
+      const res = await fn();
+      if (success) toast(typeof success === "function" ? success(res) : success, { kind: "ok" });
+      ctx.changed();
+      await view.refresh();
+      return res;
+    } catch (err) {
+      toastError(err);
+      return null;
+    }
+  }
+  view.act = act;
+
+  // ----------------------------------------------------------- header
+  function drawHead() {
+    clear(headBox);
+    const next = nextAction(ep);
+    const show = { id: ep.show, name: ep.show_name };
+    headBox.style.setProperty("--show", showColor(ep.show));
+    const undo = h("button", {
+      class: "btn btn-quiet",
+      disabled: !ep.can_undo,
+      title: ep.last_change ? `Undo: ${ep.last_change}` : "Nothing to undo",
+      svg: icons.undo,
+      onclick: () => act(() => api(epPath(ep.id) + "/undo", { method: "POST" }), (r) => r.summary),
+    });
+    undo.append("Undo");
+    add(headBox, [
+      h("p", { class: "crumbs" },
+        h("a", { href: "#/" }, "Episodes"), h("span", { "aria-hidden": "true" }, "/"),
+        h("span", { class: "swatch", style: { "--show": showColor(show.id) }, "aria-hidden": "true" }),
+        h("span", {}, show.name)),
+      h("div", { class: "ep-head" },
+        h("div", {},
+          h("h1", { class: "page-title" }, ep.title),
+          h("div", { class: "lengths" },
+            ep.sample ? h("span", { class: "tag tag-sample" }, "Sample") : null,
+            ep.test_episode ? h("span", { class: "tag tag-test" }, "Test episode") : null,
+            ep.duration
+              ? [h("span", {}, "Recording ", h("b", {}, fmtDur(ep.duration))),
+                 h("span", {}, "After cuts ", h("b", {}, fmtDur(ep.final_duration))),
+                 h("span", {}, plural(ep.cut_count, "cut"), ", ", plural(ep.chapter_count, "chapter"))]
+              : h("span", {}, plural(ep.media_count, "recording"), ", not built yet"))),
+        h("div", { class: "row" }, undo)),
+      h("ol", { class: "stages", "aria-label": "Steps" },
+        ep.stages.map((s) => h("li", { class: s.status },
+          h("span", { class: "mark", svg: s.status === "done" ? icons.check : "" }),
+          h("span", {}, s.label),
+          h("span", { class: "sr-only", style: { position: "absolute", left: "-9999px" } }, `: ${statusWord(s.status)}`)))),
+      nextStep(next),
+    ]);
+  }
+
+  function nextStep(next) {
+    const job = (ep.busy || [])[0];
+    if (job) {
+      const live = ctx.activeJobs.find((j) => j.id === job.id);
+      const pct = Math.round(((live && live.progress) || 0) * 100);
+      return h("div", { class: "next-step", "data-job-progress": job.kind },
+        h("div", { style: { flex: "1 1 320px" } },
+          h("strong", {}, job.title),
+          h("div", { class: "progress-line" },
+            h("div", { class: "bar" }, h("span", { style: { width: `${pct}%` } })),
+            h("p", {}, `${(live && live.step) || "Starting"} (${pct}%)`))));
+    }
+    const copy = {
+      "Add recordings": ["Add the raw recordings", "Paste the paths of the files, or the folder they're in."],
+      "Build episode": ["Build the episode", "Cutzo lines up the recordings, cleans the voices, writes the transcript and suggests cuts."],
+      "Build again": ["New recordings were added", "Build again to include them. Your own cuts and chapters stay."],
+      "Review cuts": ["Review the suggested cuts", "Read the transcript, bring back anything you want to keep, then export."],
+      "See exports": ["Exported", "The finished files and their checks are on the Export tab."],
+    }[next.label] || [next.label, ""];
+    let button;
+    if (next.label === "Review cuts" && tab === "review") {
+      button = h("a", { class: "btn btn-primary", href: `#/episode/${encodeURIComponent(ep.id)}/export` }, "Go to export");
+    } else if (next.label === "Build episode" || next.label === "Build again") {
+      button = h("button", { class: "btn btn-primary", onclick: build }, next.label);
+    } else {
+      button = h("a", { class: `btn ${next.quiet ? "" : "btn-primary"}`, href: `#/episode/${encodeURIComponent(ep.id)}/${next.tab}` }, next.label);
+    }
+    return h("div", { class: "next-step" }, h("p", {}, h("strong", {}, copy[0]), copy[1]), button);
+  }
+
+  async function build() {
+    await act(() => api(epPath(ep.id) + "/build", { method: "POST", body: {} }), "Building started. Progress shows on the left.");
+  }
+
+  async function removeEpisode() {
+    const ok = await confirmDialog({
+      title: "Remove this episode?",
+      text: "Cutzo moves its project files to the trash folder in your Cutzo library. Your original recordings are never touched.",
+      confirm: "Remove episode",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api(epPath(ep.id), { method: "DELETE" });
+      toast(`Removed \u201c${ep.title}\u201d.`, { kind: "ok" });
+      ctx.changed();
+      ctx.go("#/");
+    } catch (err) {
+      toastError(err);
+    }
+  }
+
+  // ------------------------------------------------------------- tabs
+  function drawTabs() {
+    clear(tabsBox);
+    for (const t of TABS) {
+      tabsBox.append(h("a", {
+        href: `#/episode/${encodeURIComponent(ep.id)}/${t.key}`,
+        "aria-selected": t.key === tab ? "true" : "false",
+        role: "tab",
+      }, t.label));
+    }
+  }
+
+  function drawTab() {
+    if (review) {
+      review.destroy();
+      review = null;
+    }
+    clear(body);
+    if (tab === "review") {
+      if (!built()) {
+        body.append(h("div", { class: "panel" },
+          h("h3", {}, "Nothing to review yet"),
+          h("p", { class: "muted" }, "Build the episode first. Cutzo then shows the transcript, the waveform and its suggested cuts here."),
+          h("a", { class: "btn btn-primary", href: `#/episode/${encodeURIComponent(ep.id)}/recordings` }, "Go to recordings")));
+        return;
+      }
+      review = mountReview(body, ep, { ...ctx, act, reload: () => view.refresh() });
+    } else if (tab === "recordings") drawRecordings();
+    else if (tab === "kit") drawKit();
+    else if (tab === "export") drawExport();
+  }
+
+  // ------------------------------------------------------- recordings
+  function drawRecordings() {
+    const paths = h("textarea", {
+      id: "add-paths",
+      placeholder: "F:\\Recordings\\Episode 12\\Nick.wav\nF:\\Recordings\\Episode 12\\Guest.wav",
+      value: draft.paths,
+      oninput: (e) => { draft.paths = e.target.value; },
+    });
+    const media = ep.media || [];
+    add(body, [
+      h("section", { class: "panel" },
+        h("h3", {}, media.length ? plural(media.length, "recording") : "No recordings yet"),
+        media.length
+          ? h("div", { class: "table-wrap" }, h("table", { class: "grid" },
+              h("thead", {}, h("tr", {}, h("th", {}, "File"), h("th", {}, "Who"), h("th", {}, "What it is"), h("th", {}, "Lined up"))),
+              h("tbody", {}, media.map((m) => h("tr", {},
+                h("td", { class: "name" }, m.name, h("span", { class: "sub" }, m.path)),
+                h("td", {}, m.person || (m.source === "mix" || m.source === "streamyard-mix" ? "Everyone" : "\u2014")),
+                h("td", {}, `${m.source_label}${m.kind ? ` (${m.kind})` : ""}`),
+                h("td", {}, m.sync ? [h("b", { class: "num" }, `${m.sync.offset >= 0 ? "+" : ""}${m.sync.offset.toFixed(3)} s`), h("span", { class: "sub" }, m.sync.method)] : h("span", { class: "muted" }, "After building")))))))
+          : h("p", { class: "muted" }, "Add the raw files below. Cutzo reads them and never changes them."),
+        ep.sample ? h("p", { class: "small muted" }, "These sample paths are examples; Cutzo doesn't look for them on disk.") : null),
+      h("div", { class: "two-col" },
+        h("section", { class: "panel" },
+          h("h3", {}, "Add recordings"),
+          h("label", { class: "field", for: "add-paths" },
+            h("span", { class: "hint" }, "One path per line: files, or the folder they're in. In File Explorer, right-click and choose Copy as path."),
+            paths),
+          h("button", {
+            class: "btn",
+            onclick: async () => {
+              const list = paths.value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+              if (!list.length) return toast("Paste at least one path first.", { kind: "error" });
+              const res = await act(() => api(epPath(ep.id) + "/import", { method: "POST", body: { paths: list } }),
+                (r) => `Importing ${plural(r.files.length, "recording")}.`);
+              if (res) {
+                draft.paths = "";
+                const box = document.getElementById("add-paths");
+                if (box) box.value = "";
+              }
+            },
+          }, "Add recordings")),
+        h("section", { class: "panel" },
+          h("h3", {}, built() ? "Build again" : "Build the episode"),
+          h("p", { class: "muted" }, "Cutzo runs four steps, in order:"),
+          h("ol", { class: "steps-list" },
+            h("li", {}, h("b", {}, "Sync: "), "lines up everyone's recordings."),
+            h("li", {}, h("b", {}, "Podcast voice: "), "removes noise and room echo, evens out voices."),
+            h("li", {}, h("b", {}, "Transcribe: "), "writes down every word with its time."),
+            h("li", {}, h("b", {}, "Auto-edit: "), "suggests cuts for dead air and filler words, and chapters.")),
+          built() ? h("p", { class: "small muted" }, "Building again replaces Cutzo's suggestions. Your own cuts and chapters, and Claude's, stay.") : null,
+          h("p", { class: "small muted" }, "Phase 1 pretends these steps with a short test clip."),
+          h("button", { class: "btn btn-primary", disabled: !media.length || (ep.busy || []).length > 0, onclick: build }, built() ? "Build again" : "Build episode"))),
+      h("p", { class: "small muted", style: { marginTop: "8px" } },
+        "Done with this episode in Cutzo? ",
+        h("button", { class: "btn btn-quiet btn-small", onclick: removeEpisode }, "Remove it from Cutzo"),
+        " Your recordings stay where they are."),
+    ]);
+  }
+
+  // ----------------------------------------------------------- kit
+  function drawKit() {
+    const panel = h("section", { class: "panel" },
+      h("h3", {}, `${ep.show_name} template`),
+      h("p", { class: "muted" }, "What this episode gets from the show kit. A change here applies to this episode only."));
+    const grid = h("div", { class: "slot-grid" });
+    for (const slot of ep.slots) {
+      const select = h("select", {
+        "aria-label": slot.label,
+        onchange: (e) => act(() => api(epPath(ep.id) + "/assets", { method: "POST", body: { slot: slot.slot, asset: e.target.value } }), (r) => r.summary),
+      }, slot.choices.map((c) => h("option", { value: c.id, selected: c.id === slot.asset.id }, c.id === slot.default ? `${c.name} (default)` : c.name)));
+      grid.append(h("div", { class: "slot" },
+        h("div", { class: "slot-label" }, slot.label),
+        h("div", { class: "slot-asset" }, slot.asset.name, slot.overridden ? h("span", { class: "tag tag-claude", style: { marginLeft: "8px" } }, "Changed for this episode") : null),
+        h("div", { class: "slot-note" }, slot.asset.folder ? `${slot.asset.folder}` : slot.note || ""),
+        slot.choices.length > 1 ? select : null));
+    }
+    panel.append(grid);
+    body.append(panel);
+    const voiced = (ep.slots.length && ep.show === "the-new-heretics");
+    if (voiced) {
+      body.append(h("section", { class: "panel" },
+        h("h3", {}, "Voiced segment titles"),
+        h("p", { class: "muted" }, "Name a chapter like one of these and its voice clip plays at that chapter: The New Heretics, Define Your Terms, Why Should We Care, Building a Better Apostasy, Heretical Haiku, Logo Loses Us.")));
+    }
+  }
+
+  // ---------------------------------------------------------- export
+  function drawExport() {
+    const presetsBox = h("div", {});
+    const exportsBox = h("div", {});
+    add(body, [presetsBox, exportsBox]);
+    api("/api/presets").then((presets) => {
+      if (!draft.picks) draft.picks = new Set(ep.outputs);
+      const pick = draft.picks;
+      const main = presets.filter((p) => !p.reserve);
+      const reserve = presets.filter((p) => p.reserve);
+      const final = ep.final_duration || 0;
+      const option = (p) => h("label", { class: "choice" },
+        h("input", {
+          type: "checkbox",
+          value: p.id,
+          checked: pick.has(p.id),
+          onchange: (e) => { if (e.target.checked) pick.add(p.id); else pick.delete(p.id); draft.confirm = null; },
+        }),
+        h("span", {},
+          h("b", {}, p.label),
+          h("span", { class: "small muted" }, p.summary),
+          h("span", { class: "small", style: { display: "block", marginTop: "4px" } }, `This episode: ${fmtSize((p.gb_per_hour * final) / 3600)} (sample length)`)));
+      const confirmBox = h("div", {});
+      const showConfirm = () => {
+        clear(confirmBox);
+        if (!draft.confirm) return;
+        add(confirmBox, h("div", { class: "next-step", style: { borderLeftColor: "var(--marker)" } },
+          h("p", {}, h("strong", {}, "Replace finished files?"), draft.confirm),
+          h("div", { class: "row" },
+            h("button", { class: "btn", onclick: () => { draft.confirm = null; showConfirm(); } }, "Keep them"),
+            h("button", { class: "btn btn-cut", onclick: () => go(true) }, "Replace"))));
+      };
+      const go = async (confirm = false) => {
+        const targets = [...pick];
+        if (!targets.length) return toast("Pick at least one target.", { kind: "error" });
+        draft.confirm = null;
+        showConfirm();
+        try {
+          await api(epPath(ep.id) + "/export", { method: "POST", body: { targets, confirm } });
+          toast("Exporting started. Progress shows on the left.", { kind: "ok" });
+          ctx.changed();
+          await view.refresh();
+        } catch (err) {
+          if (err.status === 409) {
+            draft.confirm = err.message;
+            showConfirm();
+          } else toastError(err);
+        }
+      };
+      showConfirm();
+      const busy = (ep.busy || []).some((j) => j.kind === "export");
+      add(presetsBox, h("section", { class: "panel" },
+        h("h3", {}, "Export"),
+        h("p", { class: "muted" }, `Ticked: the usual exports for ${ep.show_name}. Each finished file is checked against its platform's rules.`),
+        h("div", { class: "choice-row" }, main.map(option)),
+        reserve.length ? h("details", { style: { marginTop: "12px" } }, h("summary", { class: "small" }, "More targets"), h("div", { class: "choice-row", style: { marginTop: "10px" } }, reserve.map(option))) : null,
+        confirmBox,
+        h("div", { class: "row", style: { marginTop: "16px" } },
+          h("button", { class: "btn btn-primary", disabled: busy || !built(), onclick: () => go(false) }, busy ? "Exporting\u2026" : "Export"),
+          h("span", { class: "small muted" }, "Practice mode: no file is written yet. Real exports start in Phase 2."))));
+    }).catch(toastError);
+
+    const done = (ep.exports || []).slice().reverse();
+    if (done.length) {
+      add(exportsBox, h("h2", { class: "section-title" }, "Finished"));
+      for (const x of done) {
+        add(exportsBox, h("section", { class: "panel" },
+          h("div", { class: "row", style: { justifyContent: "space-between" } },
+            h("h3", { style: { margin: 0 } }, x.label),
+            h("span", { class: x.check.passed ? "tag tag-ok" : "tag tag-cut" }, x.check.passed ? "All checks passed" : "Some checks failed")),
+          h("p", { class: "small", style: { wordBreak: "break-all", margin: "8px 0 4px" } }, x.file),
+          h("p", { class: "small muted" }, `${relTime(x.at)}. ${x.final_length} long, ${fmtSize(x.estimated_gb)}. ${x.written ? "" : "Not written: practice mode."}`),
+          h("div", { class: "table-wrap" }, h("table", { class: "grid" },
+            h("thead", {}, h("tr", {}, h("th", {}, "Rule"), h("th", {}, "Needs"), h("th", {}, "Result"))),
+            h("tbody", {}, x.check.rules.map((r) => h("tr", {},
+              h("td", { class: "name" }, r.rule),
+              h("td", {}, r.expected),
+              h("td", { class: r.pass ? "check-pass" : "check-fail" }, r.pass ? "Pass" : "Fail", h("span", { class: "sub" }, r.found))))))),
+          h("p", { class: "small muted", style: { marginTop: "10px" } }, x.check.note)));
+      }
+    }
+  }
+
+  drawHead();
+  drawTabs();
+  drawTab();
+  return view;
+}

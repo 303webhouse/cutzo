@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Cutzo">
+  <rect width="64" height="64" rx="14" fill="#22262e"/>
+  <path d="M7 23 H34 L26 41 H7 Z" fill="#f7f7f4"/>
+  <path d="M40 23 H57 V41 H32 Z" fill="#f7f7f4"/>
+  <g fill="#22262e">
+    <rect x="11" y="29" width="2.4" height="6" rx="1.2"/>
+    <rect x="15.5" y="26.5" width="2.4" height="11" rx="1.2"/>
+    <rect x="20" y="28" width="2.4" height="8" rx="1.2"/>
+    <rect x="41" y="27" width="2.4" height="10" rx="1.2"/>
+    <rect x="45.5" y="29.5" width="2.4" height="5" rx="1.2"/>
+    <rect x="50" y="26.5" width="2.4" height="11" rx="1.2"/>
+  </g>
+  <path d="M42 12 L24 52" stroke="#e0342b" stroke-width="4.6" stroke-linecap="round"/>
+</svg>
