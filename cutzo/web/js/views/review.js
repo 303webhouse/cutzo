@@ -626,10 +626,11 @@ export function mountReview(container, initialEp, ctx) {
 
     const cam = (ep.cameras || []).length ? cameraAt(t) : null;
     if (cam) {
-      const bx = W * 0.2;
-      const by = H * 0.13;
-      const bw = W * 0.6;
-      const bh = H * 0.56;
+      // A stand-in for the camera picture, below the show title and above the spectrum.
+      const bx = W * 0.27;
+      const by = H * 0.36;
+      const bw = W * 0.46;
+      const bh = H * 0.4;
       g.fillStyle = "rgba(255, 255, 255, 0.07)";
       g.strokeStyle = camColor(cam);
       g.lineWidth = 3;
@@ -638,15 +639,15 @@ export function mountReview(container, initialEp, ctx) {
       g.stroke();
       g.fillStyle = camColor(cam);
       g.beginPath();
-      g.arc(W / 2, by + bh * 0.42, 34, 0, Math.PI * 2);
+      g.arc(W / 2, by + bh * 0.38, 27, 0, Math.PI * 2);
       g.fill();
       g.fillStyle = "#111";
-      g.font = '700 30px "Atkinson Hyperlegible Next", sans-serif';
+      g.font = '700 24px "Atkinson Hyperlegible Next", sans-serif';
       g.textAlign = "center";
       g.textBaseline = "middle";
-      g.fillText(initials(cam), W / 2, by + bh * 0.42 + 1);
+      g.fillText(initials(cam), W / 2, by + bh * 0.38 + 1);
       g.fillStyle = "#fff";
-      g.font = '700 26px "Atkinson Hyperlegible Next", sans-serif';
+      g.font = '700 22px "Atkinson Hyperlegible Next", sans-serif';
       g.fillText(`Camera: ${cam}`, W / 2, by + bh * 0.8);
     }
 
@@ -678,8 +679,9 @@ export function mountReview(container, initialEp, ctx) {
     const bw = span / bars;
     const base = H * 0.93;
     g.fillStyle = look.bar;
+    const tallest = cam ? H * 0.13 : H * 0.3;  // keep clear of the camera picture
     for (let i = 0; i < bars; i++) {
-      const hgt = Math.max(3, levels[i] * H * 0.3);
+      const hgt = Math.max(3, levels[i] * tallest);
       roundRect(g, left + i * bw + bw * 0.18, base - hgt, bw * 0.64, hgt, 2);
       g.fill();
     }
