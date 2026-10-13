@@ -15,7 +15,6 @@ import os
 import platform
 import re
 import shutil
-import sys
 import threading
 import zlib
 from datetime import datetime

@@ -6,10 +6,11 @@
     1. Makes Cutzo's own Python folder (.venv) using uv, and installs Cutzo into it.
     2. Picks the library folder (F:\Cutzo when the F: drive exists) and saves settings.json.
     3. Adds a Cutzo shortcut to the desktop and the Start menu.
-    4. Connects Cutzo to the Claude desktop app (after backing up Claude's settings file).
-    5. Opens Cutzo.
-  Nothing outside the Cutzo folder, the library folder, the two shortcuts and Claude's
-  settings file is changed. uv is installed first only if it is missing.
+    4. Adds an on-demand task, "Cutzo Engine", so Cutzo keeps running when Claude closes.
+    5. Connects Cutzo to the Claude desktop app (after backing up Claude's settings file).
+    6. Opens Cutzo.
+  Nothing outside the Cutzo folder, the library folder, the two shortcuts, that task and
+  Claude's settings file is changed. uv is installed first only if it is missing.
 #>
 param(
     [switch]$NoPause,
@@ -165,6 +166,23 @@ foreach ($folder in @([Environment]::GetFolderPath("Desktop"), [Environment]::Ge
     $link.Description = "Open Cutzo"
     $link.Save()
     Good "Shortcut: $(Join-Path $folder 'Cutzo.lnk')"
+}
+
+# --- 3b. Background task ----------------------------------------------------------
+# Cutzo's engine is started through this task so it keeps running when whatever started
+# it (the shortcut, or Claude's connector) closes. It runs only on demand, as you.
+Step "Letting Cutzo keep running in the background"
+try {
+    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $action = New-ScheduledTaskAction -Execute $VenvPyw -Argument "-m cutzo.engine" -WorkingDirectory $AppDir
+    $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName "Cutzo Engine" -Action $action -Settings $taskSettings -Principal $principal `
+        -Description "Starts Cutzo's engine when Cutzo or Claude needs it." -Force | Out-Null
+    Good "Added the task Cutzo Engine (starts only when Cutzo or Claude needs it)."
+} catch {
+    Note "Couldn't add the background task ($($_.Exception.Message)). Cutzo still works, but may stop when Claude closes."
 }
 
 # --- 4. Claude connector ----------------------------------------------------------

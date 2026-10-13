@@ -10,16 +10,13 @@ Run by hand (for testing):  python -m cutzo.mcp_server
 from __future__ import annotations
 
 import json
-import os
 import subprocess
-import sys
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
-from pathlib import Path
 from typing import Annotated, Any, Union
 
 from mcp.server.mcpserver import MCPServer
@@ -28,7 +25,8 @@ from mcp_types import ToolAnnotations
 from pydantic import Field
 
 from . import PHASE, __version__
-from .config import APP_DIR, LOCAL, SettingsError, load_settings
+from .config import LOCAL, SettingsError, load_settings
+from .starter import start_engine, tail
 
 INSTRUCTIONS = f"""Cutzo is Nick's own podcast and video editor, running on his Windows PC.
 Shows: The Dig (audio podcast, Denver Stiffs) and The New Heretics (video podcast with a fire
@@ -103,35 +101,12 @@ class Engine:
                     break
                 time.sleep(0.3)
         logs = self.settings.library / "logs"
-        detail = _tail(logs / "engine-start.log") or _tail(logs / "engine.log")
+        detail = tail(logs / "engine.log", 4, " | ") or tail(logs / "engine-start.log", 4, " | ")
         raise ToolError("Cutzo's engine didn't start. Ask Nick to open Cutzo from its desktop shortcut. "
                         f"Last lines of its log ({logs}): {detail or 'none'}")
 
     def start(self) -> subprocess.Popen | None:
-        exe = Path(sys.executable)
-        kwargs: dict[str, Any] = {}
-        if os.name == "nt":
-            windowless = exe.with_name("pythonw.exe")
-            if windowless.exists():
-                exe = windowless
-            detached, new_group, breakaway = 0x00000008, 0x00000200, 0x01000000
-            kwargs["creationflags"] = detached | new_group | breakaway
-        logs = self.settings.library / "logs"
-        logs.mkdir(parents=True, exist_ok=True)
-        out = open(logs / "engine-start.log", "ab")
-        cmd = [str(exe), "-m", "cutzo.engine"]
-        try:
-            return subprocess.Popen(cmd, cwd=str(APP_DIR), stdin=subprocess.DEVNULL, stdout=out, stderr=out,
-                                    close_fds=True, **kwargs)
-        except OSError:
-            if os.name != "nt":
-                raise
-            # Some setups don't allow leaving the app's process group; start it normally then.
-            kwargs["creationflags"] = 0x00000008 | 0x00000200
-            return subprocess.Popen(cmd, cwd=str(APP_DIR), stdin=subprocess.DEVNULL, stdout=out, stderr=out,
-                                    close_fds=True, **kwargs)
-        finally:
-            out.close()
+        return start_engine(self.settings.library)
 
     def call(self, method: str, path: str, body: dict[str, Any] | None = None,
              query: dict[str, Any] | None = None, timeout: float = 60.0) -> Any:
@@ -159,14 +134,6 @@ class Engine:
         except urllib.error.URLError as exc:
             raise ToolError(f"Couldn't reach Cutzo at {self.base} ({exc.reason}). "
                             "Open Cutzo from its desktop shortcut and try again.") from None
-
-
-def _tail(path: Path, lines: int = 4) -> str:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
-    except OSError:
-        return ""
-    return " | ".join(text[-lines:])
 
 
 engine = Engine()

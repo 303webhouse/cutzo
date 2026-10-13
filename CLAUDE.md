@@ -22,6 +22,9 @@ cutzo/web/              browser screens: vanilla JS modules, no build step, font
 cutzo/mcp_server.py     Claude connector (MCP Python SDK v2 `MCPServer`, stdio). Each tool calls
                         the engine over HTTP and starts the engine if it isn't running
 cutzo/launcher.py       what the desktop shortcut runs (pythonw -m cutzo)
+cutzo/starter.py        starts the engine so it outlives its starter: on Windows through the
+                        on-demand Task Scheduler task "Cutzo Engine" (made by setup), because
+                        the connector runs inside a job object that kills its children
 cutzo/connector_install.py  adds/removes "cutzo" in claude_desktop_config.json (with backup)
 scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRLF, ASCII only)
 ```
@@ -89,6 +92,6 @@ Environment variables: `CUTZO_HOME` (library folder), `CUTZO_PORT`, `CUTZO_SPEED
 
 ## Git
 
-The first commit (Phase 1 skeleton) went straight to `main` of the new empty repo. From now
-on, work on a branch and open a pull request. Commit messages end with the attribution
+The Phase 1 skeleton and its install fixes went straight to `main` of the new empty repo.
+From Phase 2 on, work on a branch and open a pull request. Commit messages end with the attribution
 lines given in the session.
