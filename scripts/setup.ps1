@@ -135,6 +135,14 @@ if ($code -ne 0) { Stop-Setup "Installing Cutzo's parts failed. Check the intern
 if (-not (Test-Path -LiteralPath $VenvPyw)) { Stop-Setup "pythonw.exe is missing from $Venv. Delete the .venv folder and run Setup Cutzo again." }
 Good "Installed."
 
+# The .venv's own pythonw.exe opens a console window with this Python build, so the shortcut
+# and the background task use the real pythonw.exe with run.pyw (which adds the .venv's packages).
+$BasePyw = $null
+$homeLine = Get-Content -LiteralPath (Join-Path $Venv "pyvenv.cfg") | Where-Object { $_ -match "^\s*home\s*=" } | Select-Object -First 1
+if ($homeLine) { $BasePyw = Join-Path ($homeLine -replace "^\s*home\s*=\s*", "").Trim() "pythonw.exe" }
+if (-not $BasePyw -or -not (Test-Path -LiteralPath $BasePyw)) { Stop-Setup "Couldn't find Cutzo's pythonw.exe. Delete the .venv folder and run Setup Cutzo again." }
+$Runner = Join-Path $AppDir "run.pyw"
+
 # --- 2. Library folder ------------------------------------------------------------
 Step "Choosing where Cutzo keeps its work"
 $SettingsFile = Join-Path $AppDir "settings.json"
@@ -164,8 +172,8 @@ $Shell = New-Object -ComObject WScript.Shell
 foreach ($folder in @([Environment]::GetFolderPath("Desktop"), [Environment]::GetFolderPath("Programs"))) {
     if (-not $folder) { continue }
     $link = $Shell.CreateShortcut((Join-Path $folder "Cutzo.lnk"))
-    $link.TargetPath = $VenvPyw
-    $link.Arguments = "-m cutzo"
+    $link.TargetPath = $BasePyw
+    $link.Arguments = "`"$Runner`""
     $link.WorkingDirectory = $AppDir
     $link.IconLocation = "$Icon,0"
     $link.Description = "Open Cutzo"
@@ -179,7 +187,7 @@ foreach ($folder in @([Environment]::GetFolderPath("Desktop"), [Environment]::Ge
 Step "Letting Cutzo keep running in the background"
 try {
     $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $action = New-ScheduledTaskAction -Execute $VenvPyw -Argument "-m cutzo.engine" -WorkingDirectory $AppDir
+    $action = New-ScheduledTaskAction -Execute $BasePyw -Argument "`"$Runner`" engine" -WorkingDirectory $AppDir
     $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
     $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
@@ -201,7 +209,7 @@ $code = Invoke-Tool $VenvPy @("-c", "import cutzo, cutzo.engine, cutzo.mcp_serve
 if ($code -ne 0) { Stop-Setup "Cutzo is installed but doesn't start." }
 
 if (-not $NoOpen) {
-    Start-Process -FilePath $VenvPyw -ArgumentList @("-m", "cutzo") -WorkingDirectory $AppDir
+    Start-Process -FilePath $BasePyw -ArgumentList @("`"$Runner`"") -WorkingDirectory $AppDir
     Good "Opening Cutzo in your browser."
 }
 

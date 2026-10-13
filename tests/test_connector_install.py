@@ -67,3 +67,19 @@ def test_backups_are_pruned(tmp_path):
     for n in range(8):
         ci.install([path], remove=bool(n % 2), stamp=f"2026101{n}")
     assert len(list(path.parent.glob("claude_desktop_config.cutzo-backup-*.json"))) <= ci.KEEP_BACKUPS
+
+
+def test_windowless_python_comes_from_pyvenv_cfg(tmp_path):
+    from cutzo import starter
+
+    base = tmp_path / "python" / "cpython-3.12"
+    base.mkdir(parents=True)
+    (base / "pythonw.exe").write_bytes(b"MZ")
+    venv = tmp_path / "app" / ".venv"
+    venv.mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text(f"home = {base}\nversion_info = 3.12.13\n", encoding="utf-8")
+    assert starter.base_pythonw(tmp_path / "app") == base / "pythonw.exe"
+    (venv / "pyvenv.cfg").write_text("version_info = 3.12.13\n", encoding="utf-8")
+    assert starter.base_pythonw(tmp_path / "app") is None
+    cmd = starter.windowless_command("engine")  # off Windows: the plain module command
+    assert cmd[-2:] == ["-m", "cutzo.engine"]

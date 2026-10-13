@@ -25,6 +25,9 @@ cutzo/launcher.py       what the desktop shortcut runs (pythonw -m cutzo)
 cutzo/starter.py        starts the engine so it outlives its starter: on Windows through the
                         on-demand Task Scheduler task "Cutzo Engine" (made by setup), because
                         the connector runs inside a job object that kills its children
+run.pyw                 windowless entry point: <.python pythonw.exe> run.pyw [engine]. The
+                        .venv's pythonw.exe from uv's Python build is a CONSOLE program (it opens
+                        a black window), so shortcut and task use the real pythonw.exe + run.pyw
 cutzo/connector_install.py  adds/removes "cutzo" in claude_desktop_config.json (with backup)
 scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRLF, ASCII only)
 ```

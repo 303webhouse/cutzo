@@ -42,19 +42,42 @@ def run_task() -> bool:
     return result.returncode == 0
 
 
-def popen_engine(library: Path) -> subprocess.Popen:
+def base_pythonw(app_dir: Path = APP_DIR) -> Path | None:
+    """The real (windowless) pythonw.exe that Cutzo's .venv is built on, from .venv/pyvenv.cfg."""
+    try:
+        lines = (Path(app_dir) / ".venv" / "pyvenv.cfg").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        key, _, value = line.partition("=")
+        if key.strip().lower() == "home" and value.strip():
+            candidate = Path(value.strip()) / "pythonw.exe"
+            return candidate if candidate.exists() else None
+    return None
+
+
+def windowless_command(*args: str) -> list[str]:
+    """How to run Cutzo with no console window: run.pyw on the real pythonw.exe when possible.
+    (With this Python build the .venv's own pythonw.exe opens a console window.)"""
+    runner = APP_DIR / "run.pyw"
+    base = base_pythonw() if os.name == "nt" else None
+    if base and runner.exists():
+        return [str(base), str(runner), *args]
     exe = Path(sys.executable)
+    if os.name == "nt" and exe.with_name("pythonw.exe").exists():
+        exe = exe.with_name("pythonw.exe")
+    return [str(exe), "-m", "cutzo.engine" if args[:1] == ("engine",) else "cutzo"]
+
+
+def popen_engine(library: Path) -> subprocess.Popen:
     kwargs: dict = {}
     if os.name == "nt":
-        windowless = exe.with_name("pythonw.exe")
-        if windowless.exists():
-            exe = windowless
         kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
     else:
         kwargs["start_new_session"] = True
     logs = Path(library) / "logs"
     logs.mkdir(parents=True, exist_ok=True)
-    cmd = [str(exe), "-m", "cutzo.engine"]
+    cmd = windowless_command("engine")
     with open(logs / "engine-start.log", "ab") as out:
         try:
             return subprocess.Popen(cmd, cwd=str(APP_DIR), stdin=subprocess.DEVNULL, stdout=out, stderr=out,
