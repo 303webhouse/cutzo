@@ -37,10 +37,31 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
   exceptions reach Claude as a generic error.
 - One engine process owns state and the job queue, so the screens and Claude always agree.
   The screens poll `/api/state` every 1.5 s and toast changes made by Claude.
-- Core modules: `kit.py` (show-kit inventory from Drive), `shows.py` (templates and slots),
-  `presets.py` (export targets and rules), `media.py` (StreamYard/GH5 file names),
+- Core modules: `kit.py` (show-kit inventory from Drive, plus `local_copy` of a kit file as
+  working audio), `shows.py` (templates and slots), `presets.py` (export targets, rules and
+  the `spec` each finished file is checked against), `media.py` (StreamYard/GH5 file names),
   `timeline.py` (cut arithmetic), `transcript.py`, `jobs.py`, `activity.py`, `safety.py`,
   `sample.py` (Phase 1 sample episodes and the synthesized test clips).
+- Phase 2 (real audio) modules:
+  - `tools/` one wrapper per outside program: `ffmpeg.py` (probe, decode, loudness, run with
+    progress and cancel, chapter metadata), `deepfilter.py` (DeepFilterNet noise removal).
+    `tools/__init__.py` pins each download (URL, size, sha256, licence); `python -m
+    cutzo.tools.install` fetches them into `<app>/tools` (setup.ps1 runs it). `tools.find()`
+    prefers Cutzo's own copy, then PATH. `CUTZO_TOOLS` moves the folder (tests).
+  - `core/audio.py` numpy maths on working audio: raw 32-bit float, 48 kHz, no header
+    (`.f32`), memory-mapped so long episodes never fill memory. Loudness outline, waveform
+    peaks, silence finding, dead-air cuts, lining recordings up by sound.
+  - `core/voice.py` the Podcast voice chain (rumble filter, DeepFilterNet in 300 s pieces on
+    several workers with crossfaded joins, de-esser, compressor, leveller) and its settings.
+  - `core/build.py` the real build: choose sources (StreamYard mix vs separate tracks), decode,
+    line up, voice cleanup, previews (`preview.m4a`, `original.m4a`), dead-air suggestions.
+  - `core/recipes.py` each show's layout, copied from Nick's Premiere project (The Dig: intro
+    theme under the cold open, bites, stinger before each chapter, sign-off, outro), with kit
+    levels relative to the talk loudness.
+  - `core/render.py` turns a layout into a stereo mix, encodes it (MP3 with chapters and
+    tags, gain plus limiter to the target loudness, one fine-tune pass) and checks the file.
+- Episode folders hold `voice.f32` (cleaned talk, recording time), `original.f32`, the two
+  previews and `waveform-*.json` caches. Exports render `mix.f32` then delete it.
 
 ## Rules to keep
 
@@ -67,23 +88,28 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
   except on the deck, which is dark in both looks. Check new screens in both looks.
 - Windows scripts stay ASCII with CRLF line endings (`.gitattributes` keeps them as committed).
 
-## Phase 1 pretend parts and where Phase 2 plugs in
+## Sample episodes vs real episodes
 
-`Cutzo._apply_sync`, `_apply_voice`, `_apply_transcribe`, `_apply_auto_edit` (called by
-`_build_work`) and `_export_work` / `_mock_check` are the pretend steps. Replace them with
-FFmpeg, whisper.cpp and the voice-cleanup models behind small wrapper modules (one module
-per external tool, so each can be swapped). Keep the method names and the job steps.
+Episodes marked `sample` still use the Phase 1 pretend steps (`_apply_sync`, `_apply_voice`,
+`_apply_transcribe`, `_apply_auto_edit`, `_export_work`, `_mock_check`). Real episodes go
+through `_real_build` and `_real_export_work`. The transcribe stage is `"later"` for real
+episodes until Phase 3 (whisper.cpp); stages treat "later" like done. Video export is refused
+for real episodes until Phase 3. New outside programs get their own wrapper in `cutzo/tools/`.
 
 ## Running things
 
 ```
 uv venv --python 3.12 --python-preference only-managed .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
-.venv/bin/python -m pytest             (all tests, about 30 seconds)
+.venv/bin/python -m cutzo.tools.install   (FFmpeg and DeepFilterNet into ./tools)
+.venv/bin/python -m pytest             (all tests, about 2.5 minutes; real-audio tests skip
+                                        themselves when FFmpeg isn't installed)
 .venv/bin/python -m cutzo.engine --speed 0.1   (engine with 10x faster pretend jobs)
 ```
 
-Environment variables: `CUTZO_HOME` (library folder), `CUTZO_PORT`, `CUTZO_SPEED`.
+Environment variables: `CUTZO_HOME` (library folder), `CUTZO_PORT`, `CUTZO_SPEED`,
+`CUTZO_DRIVE` (Google Drive folder with the show kits), `CUTZO_TOOLS` (tools folder),
+`CUTZO_TOOLS_ONLY` (ignore programs on PATH).
 `tests/test_connector.py` runs the real connector over stdio and lets it start an engine.
 
 ## Nick's PC (checked Oct 13, 2026)
@@ -101,6 +127,13 @@ Environment variables: `CUTZO_HOME` (library folder), `CUTZO_PORT`, `CUTZO_SPEED
   has the same kind of redirection: never build Cutzo's .venv from it.
 - git 2.53 and gh (signed in as 303webhouse). Library `F:\Cutzo`, app `F:\Cutzo\app`.
 - Free space: C: about 75 GB (never write media there), F: about 710 GB.
+- Google Drive for desktop at `G:\My Drive` (show kits under `Denver Stiffs\The Dig` etc.).
+- Graphics card: NVIDIA GeForce RTX 2070 SUPER (CUDA works with torch 2.5.1+cu124). DeepFilterNet
+  runs on the processor; Cutzo doesn't need the graphics card yet. `F:\Cutzo\lab` is a scratch area for
+  experiments: `cutzo-dev` (a clone of the repo), `models-venv` (Resemble Enhance and
+  VoiceFixer for the listening test), `listen\index.html` (the listening test page).
+  `lab\bg.ps1 -Script x.py` runs a lab script in the background with Cutzo's Python and
+  writes `x.log`/`x.err`, because Desktop Commander gives up on commands after 60 seconds.
 
 ## Git
 

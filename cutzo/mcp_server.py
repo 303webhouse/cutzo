@@ -195,10 +195,18 @@ def list_episodes(show: Annotated[str | None, Field(description="Optional: 'The 
 
 
 @server.tool(annotations=READ, structured_output=False)
-def get_episode(episode: Episode) -> dict[str, Any]:
-    """Everything about one episode: recordings, stages, cuts (with ids), chapters, show-kit choices, exports."""
+def get_episode(
+    episode: Episode,
+    dead_air_details: Annotated[bool, Field(description="List every automatic dead-air cut (there can be hundreds). "
+                                                        "Leave false to get just their count.")] = False,
+) -> dict[str, Any]:
+    """Everything about one episode: recordings, stages, cuts (with ids), chapters, show-kit choices, exports.
+    Automatic dead-air cuts are summarized unless dead_air_details is true."""
     e = engine.call("GET", _ep(episode))
     out = _episode_brief(e)
+    cuts = [x for x in e["edits"] if x["type"] == "cut"]
+    auto = [x for x in cuts if x.get("reason") == "dead air" and x.get("by") == "auto"]
+    shown = cuts if dead_air_details else [x for x in cuts if x not in auto]
     out.update({
         "stages": ", ".join(f"{s['label']}: {s['status']}" for s in e["stages"]),
         "recordings": [{"name": m["name"], "kind": m.get("kind"), "person": m.get("person"),
@@ -206,7 +214,12 @@ def get_episode(episode: Episode) -> dict[str, Any]:
                        for m in e["media"]],
         "cameras": e.get("cameras") or None,
         "cuts": [{"id": x["id"], "from": x["start_text"], "to": x["end_text"], "why": x.get("reason"),
-                  "words": x.get("text"), "by": x.get("by")} for x in e["edits"] if x["type"] == "cut"],
+                  "words": x.get("text"), "by": x.get("by")} for x in shown],
+        "dead_air_cuts": ({"count": len(auto),
+                           "total_seconds": round(sum(x["end"] - x["start"] for x in auto), 1),
+                           "note": "Listed in 'cuts'." if dead_air_details else
+                           "Not listed; call get_episode with dead_air_details=true to see them."}
+                          if auto else None),
         "camera_choices": [{"id": x["id"], "from": x["start_text"], "to": x["end_text"], "angle": x.get("angle"),
                             "by": x.get("by")} for x in e["edits"] if x["type"] == "camera"] or None,
         "chapters": [{"id": c["id"], "at": c["time_text"], "title": c["title"], "in_finished_file": c["output_text"],
