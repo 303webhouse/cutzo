@@ -451,8 +451,9 @@ def main(argv: list[str] | None = None) -> int:
     log.info("Starting Cutzo %s with library %s on %s", __version__, settings.library, settings.base_url)
     cutzo = Cutzo(settings.library, speed=args.speed, drive=settings.drive)
     app = create_app(cutzo)
+    # A browser tab playing audio keeps a stream open; don't let that hold up quitting.
     config = uvicorn.Config(app, host=settings.host, port=settings.port, log_config=None, access_log=False,
-                            log_level="warning")
+                            log_level="warning", timeout_graceful_shutdown=3)
     server = uvicorn.Server(config)
     app.state.server = server
     try:
