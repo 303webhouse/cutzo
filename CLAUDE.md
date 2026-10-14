@@ -53,13 +53,15 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
     peaks, silence finding, dead-air cuts, lining recordings up by sound.
   - `core/voice.py` the Podcast voice chain (rumble filter, DeepFilterNet in 300 s pieces on
     several workers with crossfaded joins, de-esser, compressor, leveller) and its settings.
+    Strength 25 ("light") is the default: Nick picked it in a blind listening test (Oct 14).
   - `core/build.py` the real build: choose sources (StreamYard mix vs separate tracks), decode,
     line up, voice cleanup, previews (`preview.m4a`, `original.m4a`), dead-air suggestions.
   - `core/recipes.py` each show's layout, copied from Nick's Premiere project (The Dig: intro
     theme under the cold open, bites, stinger before each chapter, sign-off, outro), with kit
     levels relative to the talk loudness.
-  - `core/render.py` turns a layout into a stereo mix, encodes it (MP3 with chapters and
-    tags, gain plus limiter to the target loudness, one fine-tune pass) and checks the file.
+  - `core/render.py` turns a layout into a stereo mix (music dips by `Plan.duck_db` while a voice
+    plays over it), encodes it (MP3 with chapters and tags, gain plus limiter to the target
+    loudness, one fine-tune pass) and checks the file.
 - Episode folders hold `voice.f32` (cleaned talk, recording time), `original.f32`, the two
   previews and `waveform-*.json` caches. Exports render `mix.f32` then delete it.
 
