@@ -19,9 +19,16 @@ from ..core.errors import CutzoError
 from . import require
 
 CREATE_NO_WINDOW = 0x08000000
-# Seconds of audio per second of work, measured on Nick's PC (Ryzen 9 3900X); only used to
-# show progress, since deep-filter prints none.
-SPEED = 25.0
+# deep-filter prints no progress, so Cutzo estimates it from how fast it has been going: seconds of
+# audio cleaned per second, per process. First guess from Nick's PC (Ryzen 9 3900X, 8 pieces at
+# once: about 1.6); after that, the speeds of the pieces this engine has finished.
+SPEED = 1.6
+_seen: list[float] = []
+
+
+def _speed() -> float:
+    recent = _seen[-8:]
+    return sum(recent) / len(recent) if recent else SPEED
 
 
 def denoise(src_wav: Path, dst_wav: Path, *, limit_db: float = 100.0, post_filter: bool = False,
@@ -41,7 +48,7 @@ def denoise(src_wav: Path, dst_wav: Path, *, limit_db: float = 100.0, post_filte
         with open(log, "wb") as out:
             proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, **kwargs)
             started = time.monotonic()
-            expected = (duration / SPEED) if duration else None
+            expected = (duration / max(0.1, _speed())) if duration else None
             try:
                 while proc.poll() is None:
                     if check:
@@ -59,6 +66,9 @@ def denoise(src_wav: Path, dst_wav: Path, *, limit_db: float = 100.0, post_filte
             reason = lines[-1] if lines else f"exit code {proc.returncode}"
             raise CutzoError(f"DeepFilterNet couldn't clean the audio: {reason}")
         shutil.move(str(result), str(dst_wav))
+        took = time.monotonic() - started
+        if duration and took > 1.0:
+            _seen.append(duration / took)
     if progress:
         progress(1.0)
     return dst_wav
