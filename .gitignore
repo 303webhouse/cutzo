@@ -1,6 +1,7 @@
-# Cutzo's own Python, its Python folder and per-computer settings
+# Cutzo's own Python, its Python folder, its tools (FFmpeg and friends) and per-computer settings
 .python/
 .venv/
+/tools/
 settings.json
 
 # Python leftovers
