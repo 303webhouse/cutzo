@@ -228,6 +228,24 @@ def test_dig_layout_matches_season_debrief_part_2():
     # Chapter 2 starts with its stinger, a beat before the talk: talk_start + 200 s + one break.
     assert plan.chapters[1]["time"] == pytest.approx(60.661 + 200 + gap - 1.1, abs=0.1)
     assert plan.total > plan.talk_end > plan.talk_start
+    assert plan.duck_db == recipes.THE_DIG["duck_db"] > 0  # music dips under voices (Nick, Oct 14)
+
+
+def test_music_dips_while_someone_talks(tmp_path):
+    music = audio.write_f32(tmp_path / "music.f32", np.full((RATE * 10, 2), 0.5, dtype=np.float32))
+    silent = audio.write_f32(tmp_path / "voice.f32", np.zeros(RATE * 10, dtype=np.float32))
+    pieces = [render.Piece(src=music, channels=2, start=0.0, end=10.0, at=0.0, kind="music"),
+              render.Piece(src=silent, channels=1, start=0.0, end=2.0, at=3.0, kind="voice"),
+              render.Piece(src=silent, channels=1, start=0.0, end=1.0, at=5.5, kind="voice")]  # joins: gap < 1 s
+    y = audio.Pcm(render.mix(render.Plan(pieces=pieces, duck_db=6.0), tmp_path / "m.f32"), channels=2).open()
+    level = lambda t: float(y[int(t * RATE), 0])  # noqa: E731
+    assert level(1.0) == pytest.approx(0.5, abs=1e-4)  # before anyone talks
+    assert level(2.8) == pytest.approx(0.5 * 10 ** (-3 / 20), abs=2e-3)  # halfway down the 0.4 s lead-in
+    assert level(4.0) == pytest.approx(0.5 * 10 ** (-6 / 20), abs=1e-3)
+    assert level(5.2) == pytest.approx(0.5 * 10 ** (-6 / 20), abs=1e-3)  # stays down across the short gap
+    assert level(8.0) == pytest.approx(0.5, abs=1e-4)  # back up after the 1 s release
+    flat = audio.Pcm(render.mix(render.Plan(pieces=pieces), tmp_path / "f.f32"), channels=2).open()
+    assert float(flat[int(4.0 * RATE), 0]) == pytest.approx(0.5, abs=1e-4)  # no dips unless asked
 
 
 def test_layout_without_kit_is_just_the_talk():

@@ -425,7 +425,7 @@ export async function render(main, params, ctx) {
     return h("div", { class: "field", style: { marginTop: "12px" } },
       h("span", {}, "Cleanup strength: ", out, " of 100"),
       slider,
-      h("span", { class: "hint" }, "How far background noise is turned down. Build again to hear a change."));
+      h("span", { class: "hint" }, "How far background noise is turned down. 25 is the light setting you picked in the listening test. Build again to hear a change."));
   }
 
   drawHead();

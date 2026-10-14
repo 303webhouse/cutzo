@@ -419,7 +419,7 @@ def set_dead_air(
 @server.tool(annotations=CHANGE, structured_output=False)
 def set_voice_strength(
     episode: Episode,
-    strength: Annotated[int, Field(description="0 = no noise removal, 100 = strongest. The show's default is 70.", ge=0, le=100)],
+    strength: Annotated[int, Field(description="0 = no noise removal, 100 = strongest. Both shows default to 25 (light), which Nick picked in a listening test.", ge=0, le=100)],
 ) -> dict[str, Any]:
     """How strongly this episode's voices are cleaned. Takes effect when the episode is built again
     (build_episode)."""

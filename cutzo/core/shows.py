@@ -29,7 +29,7 @@ SHOWS: list[dict[str, Any]] = [
         "test_episode": "the-dig-season-debrief-part-2",
         "color": "#d9a441",
         "outputs": ["podcast-mp3"],
-        "voice": {"preset": "Podcast voice", "strength": 70},
+        "voice": {"preset": "Podcast voice", "strength": 25},  # light: Nick's pick (Oct 14, 2026)
         "loudness": {"podcast": -16, "video": -14},
         # Episode layout copied from Season Debrief Part 2 in Premiere (see recipes.py).
         "recipe": "the-dig",
@@ -55,7 +55,7 @@ SHOWS: list[dict[str, Any]] = [
         "test_episode": "the-new-heretics-spooky-sode",
         "color": "#ff6a3d",
         "outputs": ["youtube-4k", "podcast-mp3"],
-        "voice": {"preset": "Podcast voice", "strength": 70},
+        "voice": {"preset": "Podcast voice", "strength": 25},  # light: Nick's pick (Oct 14, 2026)
         "loudness": {"podcast": -16, "video": -14},
         "slots": [
             {"slot": "intro", "label": "Opening montage", "default": "tnh-intro",

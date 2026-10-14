@@ -13,6 +13,11 @@ read from its project file:
 Levels are Premiere's clip gains, measured against the talking in Nick's finished file
 (-19.2 LUFS there), so Cutzo keeps his balance between talk, theme and bites. The finished
 file is then set to the podcast loudness target as a whole.
+
+Changed after Nick heard the first rebuild (Oct 14, 2026): voices over the intro and ending music
+were a bit too low. The theme now dips 5 dB whenever someone talks over it ("duck_db"), the cold
+open and sign-off clips are 1.5 dB louder, and the ending theme is 3 dB softer. Measured on Season
+Debrief Part 2, voices went from 6 LU (cold open) and 1 LU (sign-off) above the music to 12 and 10.
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ TALK_REFERENCE_LUFS = -19.2
 THE_DIG: dict[str, Any] = {
     "intro": {
         "cold_open_at": 0.5,
-        "cold_open_gain_db": 4.0,
+        "cold_open_gain_db": 5.5,  # Premiere had 4.0
         "cold_open_end": 19.15,  # where Nick's cold open ended; everything after moves with it
         "theme": {"start": 0.0, "length": 64.531, "at": 0.2, "gain_db": -4.4, "fade_out": 12.8},
         "bites": [  # asset, start, end (in the asset), at (finished time), Premiere gain
@@ -53,13 +58,14 @@ THE_DIG: dict[str, Any] = {
     },
     "outro": {
         "lead_in": 18.0,
-        "theme_gain_db": 0.45,
+        "theme_gain_db": -2.55,  # Premiere had 0.45
         "clips_after": 3.0,  # sign-off clips start this long after the talking ends
-        "clips_gain_db": 6.5,
+        "clips_gain_db": 8.0,  # Premiere had 6.5
         "tail": 7.2,  # theme keeps playing this long after the last clip
         "fade_out": 10.0,
         "no_clips_tail": 20.0,
     },
+    "duck_db": 5.0,  # the theme dips this much while someone talks over it
     "max_cold_open": 45.0,
     "max_outro": 60.0,
 }
@@ -95,6 +101,7 @@ def plan_episode(ep: dict[str, Any], show: dict[str, Any], *, voice_path: Path, 
         plan.chapters = _chapters(chapters, to_finished, {})
         return plan
 
+    plan.duck_db = float(recipe.get("duck_db", 0.0))
     kit_offset = talk_lufs - TALK_REFERENCE_LUFS  # keeps Nick's balance whatever level the talk is at
     theme = slot_choice(show, ep, "theme")
     montage = slot_choice(show, ep, "montage")
@@ -192,4 +199,4 @@ def describe(plan: render.Plan) -> dict[str, Any]:
     for p in plan.pieces:
         kinds[p.label] = kinds.get(p.label, 0) + 1
     return {"length": round(plan.total, 3), "talk_starts": round(plan.talk_start, 3), "talk_ends": round(plan.talk_end, 3),
-            "pieces": kinds, "chapters": plan.chapters}
+            "pieces": kinds, "chapters": plan.chapters, "music_dips_db": plan.duck_db}

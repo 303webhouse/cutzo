@@ -33,7 +33,7 @@ FADE = 0.02  # seconds of crossfade where pieces join
 
 @dataclass(frozen=True)
 class VoiceSettings:
-    strength: int = 70  # 0 = no noise removal, 100 = as much as the model can
+    strength: int = 25  # 0 = none, 100 = as much as the model can; 25 ("light") won Nick's listening test
     rumble_hz: int = 80  # 0 = off
     deess: bool = True
     compress: bool = True
@@ -44,7 +44,7 @@ class VoiceSettings:
     def from_dict(cls, data: dict | None) -> "VoiceSettings":
         data = dict(data or {})
         return cls(
-            strength=int(max(0, min(100, data.get("strength", 70)))),
+            strength=int(max(0, min(100, data.get("strength", 25)))),
             rumble_hz=int(max(0, min(200, data.get("rumble_hz", 80)))),
             deess=bool(data.get("deess", True)),
             compress=bool(data.get("compress", True)),

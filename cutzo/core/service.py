@@ -460,7 +460,7 @@ class Cutzo:
 
     def _apply_voice(self, ep_id: str, show_id: str) -> None:
         show = showlib.get_show(show_id) or {}
-        voice = show.get("voice", {"preset": "Podcast voice", "strength": 70})
+        voice = show.get("voice", {"preset": "Podcast voice", "strength": 25})
         with self._lock:
             ep = self._load(ep_id)
             ep["voice"] = {"preset": voice["preset"], "strength": voice["strength"], "steps": VOICE_CHAIN,

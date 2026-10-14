@@ -10,6 +10,7 @@ Times: `start`/`end` are inside the piece's source, `at` is on the finished time
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -21,6 +22,12 @@ from . import audio, timeline
 
 XFADE = 0.012  # seconds of crossfade at every cut in the conversation
 PEAK_MARGIN = 2.0  # dB between the limiter and the true-peak limit (room for encoding overshoot)
+# Music dips under voices ("ducking"): it starts going down DUCK_ATTACK seconds before a voice comes
+# in, comes back up over DUCK_RELEASE seconds after it stops, and stays down across gaps shorter than
+# DUCK_JOIN seconds (so it doesn't bob between sentences).
+DUCK_ATTACK = 0.4
+DUCK_RELEASE = 1.0
+DUCK_JOIN = 1.0
 
 
 @dataclass
@@ -56,10 +63,44 @@ class Plan:
     chapters: list[dict[str, Any]] = field(default_factory=list)  # finished-file times
     talk_start: float = 0.0
     talk_end: float = 0.0
+    duck_db: float = 0.0  # how far music dips while someone talks over it (0 = never)
 
     @property
     def total(self) -> float:
         return max((p.until for p in self.pieces), default=0.0)
+
+    def voice_spans(self) -> list[tuple[float, float]]:
+        """When someone is talking on the finished timeline (gaps under DUCK_JOIN joined)."""
+        spans: list[list[float]] = []
+        for a, b in sorted((p.at, p.until) for p in self.pieces if p.kind == "voice" and p.length > 0):
+            if spans and a <= spans[-1][1] + DUCK_JOIN:
+                spans[-1][1] = max(spans[-1][1], b)
+            else:
+                spans.append([a, b])
+        return [(a, b) for a, b in spans]
+
+
+def duck_curve(t: np.ndarray, spans: list[tuple[float, float]], depth_db: float) -> np.ndarray:
+    """Gain (0..1) for music at times `t` (seconds): down by `depth_db` while a voice plays, with
+    straight ramps in decibels before and after each voice span."""
+    if depth_db <= 0 or not spans or not len(t):
+        return np.ones(len(t), dtype=np.float32)
+    db = np.zeros(len(t), dtype=np.float64)
+    lo_t, hi_t = float(t[0]), float(t[-1])
+    first = bisect.bisect_left([b for _, b in spans], lo_t - DUCK_RELEASE)  # spans are sorted and apart
+    for a, b in spans[first:]:
+        lo, hi = a - DUCK_ATTACK, b + DUCK_RELEASE
+        if lo > hi_t:
+            break
+        if hi < lo_t:
+            continue
+        i, j = np.searchsorted(t, lo), np.searchsorted(t, hi)
+        if j <= i:
+            continue
+        x = t[i:j]
+        ramp = np.minimum(np.clip((x - lo) / DUCK_ATTACK, 0.0, 1.0), np.clip((hi - x) / DUCK_RELEASE, 0.0, 1.0))
+        db[i:j] = np.minimum(db[i:j], -depth_db * ramp)
+    return (10.0 ** (db / 20.0)).astype(np.float32)
 
 
 def conversation(voice_path: Path, kept: list[tuple[float, float]], at: float,
@@ -109,6 +150,7 @@ def mix(plan: Plan, dst: Path, *, check: Callable[[], None] | None = None,
     out = np.memmap(dst, dtype="<f4", mode="w+", shape=(frames, 2))
     block = audio.BLOCK
     sources: dict[tuple[Path, int], np.ndarray] = {}
+    spans = plan.voice_spans() if plan.duck_db > 0 else []
     for pos in range(0, frames, block):
         if check:
             check()
@@ -142,6 +184,8 @@ def mix(plan: Plan, dst: Path, *, check: Callable[[], None] | None = None,
                 gain *= _shape(np.clip(local / p.fade_in, 0.0, 1.0), p.curve)
             if p.fade_out > 0:
                 gain *= _shape(np.clip((p.length - local) / p.fade_out, 0.0, 1.0), p.curve)
+            if spans and p.kind == "music":
+                gain *= duck_curve(local + p.at, spans, plan.duck_db)
             if p.channels == 1:
                 seg = np.repeat(seg, 2, axis=1) if seg.ndim == 2 else np.stack([seg, seg], axis=1)
             acc[a - pos:a - pos + n] += seg[:, :2] * gain[:, None]
