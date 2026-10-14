@@ -81,11 +81,16 @@ export function mountReview(container, initialEp, ctx) {
 
   // -------------------------------------------------------------- data
   function computeCuts() {
-    const ranges = ep.edits.filter((e) => e.type === "cut").map((e) => [e.start, e.end]).sort((a, b) => a[0] - b[0]);
+    // [start, end, pause?]: a range is a "pause" when only Cutzo's dead-air suggestions cover it.
+    const ranges = ep.edits.filter((e) => e.type === "cut")
+      .map((e) => [e.start, e.end, e.reason === "dead air" && e.by === "auto"]).sort((a, b) => a[0] - b[0]);
     const merged = [];
-    for (const [a, b] of ranges) {
-      if (merged.length && a <= merged[merged.length - 1][1] + 1e-6) merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], b);
-      else merged.push([a, b]);
+    for (const [a, b, pause] of ranges) {
+      const last = merged[merged.length - 1];
+      if (last && a <= last[1] + 1e-6) {
+        last[1] = Math.max(last[1], b);
+        last[2] = last[2] && pause;
+      } else merged.push([a, b, pause]);
     }
     cuts = merged;
   }
@@ -349,9 +354,11 @@ export function mountReview(container, initialEp, ctx) {
   function drawSide() {
     clear(side);
     const cutEdits = ep.edits.filter((e) => e.type === "cut");
+    const dead = cutEdits.filter((e) => e.reason === "dead air" && e.by === "auto");
     const removed = Math.max(0, (ep.duration || 0) - (ep.final_duration || 0));
+    const counted = dead.length ? `${plural(cutEdits.length - dead.length, "cut")} + ${plural(dead.length, "pause")}` : plural(cutEdits.length, "cut");
     const cutsSec = h("section", {},
-      h("div", { class: "side-head" }, h("h3", {}, "Cuts"), h("span", {}, `${plural(cutEdits.length, "cut")}, ${fmtDur(removed)} out`)));
+      h("div", { class: "side-head" }, h("h3", {}, "Cuts"), h("span", {}, `${counted}, ${fmtDur(removed)} out`)));
     const cutItem = (e) => h("li", { class: "item" },
       h("div", { class: "item-main", onclick: () => seek(Math.max(0, e.start - 1.5)), title: "Jump to this cut" },
         h("div", { class: "item-time" }, `${e.start_text}–${e.end_text}`),
@@ -360,7 +367,6 @@ export function mountReview(container, initialEp, ctx) {
           h("span", { class: "tag tag-cut" }, REASON[e.reason] || "Cut"),
           h("span", { class: e.by === "claude" ? "tag tag-claude" : "tag" }, BY[e.by] || e.by))),
       h("button", { class: "btn btn-quiet btn-small", onclick: () => restore(e) }, "Bring back"));
-    const dead = cutEdits.filter((e) => e.reason === "dead air" && e.by === "auto");
     if (!cutEdits.length) {
       cutsSec.append(h("p", { class: "muted small" }, ep.has_transcript
         ? "No cuts yet. Select words in the transcript, or drag across the waveform."
@@ -673,12 +679,21 @@ export function mountReview(container, initialEp, ctx) {
       g.fillStyle = inCut ? "rgba(236, 238, 241, 0.16)" : t <= now ? "#ffffff" : "#9aa2ae";
       g.fillRect(i * step, mid - amp, barW, amp * 2);
     }
-    // Spliced-out cuts: slanted edges, like tape cut on a splicing block.
-    const slant = 7 * dpr;
-    for (const [ca, cb] of cuts) {
+    // Spliced-out cuts: slanted edges, like tape cut on a splicing block. A cut too narrow to see
+    // at this zoom gets a thin mark instead: short and faint for a shortened pause, full height
+    // for a cut someone made. Otherwise an hour of trimmed pauses looks shredded.
+    for (const [ca, cb, pause] of cuts) {
       if (cb < a || ca > b) continue;
       const x0 = x(ca);
-      const x1 = Math.max(x(cb), x0 + 2 * dpr);
+      const wide = x(cb) - x0;
+      if (wide < 4 * dpr) {
+        g.fillStyle = pause ? "rgba(224, 52, 43, 0.55)" : "#e0342b";
+        if (pause) g.fillRect(x0, H - 10 * dpr, Math.max(1 * dpr, wide), 10 * dpr);
+        else g.fillRect(x0, 0, Math.max(2 * dpr, wide), H);
+        continue;
+      }
+      const slant = Math.min(7 * dpr, wide / 2);
+      const x1 = x0 + wide;
       g.beginPath();
       g.moveTo(x0 + slant, 0);
       g.lineTo(x1 + slant, 0);

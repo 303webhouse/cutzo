@@ -159,7 +159,8 @@ def _episode_brief(e: dict[str, Any]) -> dict[str, Any]:
         "stage": e["stage_label"],
         "length": e["length_text"],
         "final_length": e.get("final_text"),
-        "cuts": e["cut_count"],
+        "cuts": e["cut_count"] - e.get("pause_count", 0),
+        "pauses_shortened": e.get("pause_count") or None,
         "chapters": e["chapter_count"],
         "exports": e["export_count"],
     }

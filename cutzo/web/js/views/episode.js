@@ -111,7 +111,8 @@ export async function render(main, params, ctx) {
               ? [h("span", {}, "Recording ", h("b", {}, fmtDur(ep.duration))),
                  h("span", {}, "After cuts ", h("b", {}, fmtDur(ep.final_duration))),
                  ep.finished_duration ? h("span", { title: "With the intro, breaks and ending" }, "Finished file ", h("b", {}, fmtDur(ep.finished_duration))) : null,
-                 h("span", {}, plural(ep.cut_count, "cut"), ", ", plural(ep.chapter_count, "chapter"))]
+                 h("span", {}, plural(ep.cut_count - (ep.pause_count || 0), "cut"),
+                   ep.pause_count ? `, ${plural(ep.pause_count, "pause")} shortened` : "", ", ", plural(ep.chapter_count, "chapter"))]
               : h("span", {}, plural(ep.media_count, "recording"), ", not built yet"))),
         h("div", { class: "row" }, undo)),
       h("ol", { class: "stages", "aria-label": "Steps" },

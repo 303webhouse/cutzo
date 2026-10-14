@@ -1688,6 +1688,8 @@ class Cutzo:
             "length_text": fmt_duration(ep["duration"]) if ep.get("duration") else "Not built yet",
             "final_text": fmt_duration(final) if final is not None else None,
             "cut_count": sum(1 for e in ep.get("edits", []) if e["type"] == "cut"),
+            "pause_count": sum(1 for e in ep.get("edits", []) if e["type"] == "cut" and e.get("reason") == "dead air"
+                               and e.get("by") == "auto"),
             "chapter_count": len(ep.get("chapters", [])),
             "media_count": len(ep.get("media", [])),
             "export_count": sum(1 for x in ep.get("exports", []) if x["status"] == "done"),
