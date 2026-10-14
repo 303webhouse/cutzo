@@ -1,6 +1,8 @@
 // Review: the deck (preview, player, waveform with spliced-out cuts) above the
 // transcript, which you mark up like a script: select words to cut them, click
-// struck words to bring them back.
+// struck words to bring them back. Real episodes have no transcript until Phase 3:
+// there the deck adds a zoomed waveform for precise selections, a switch to hear the
+// original sound, and the panel below holds the cold open, sign-off and dead-air settings.
 
 import { api, epPath } from "../api.js";
 import { h, add, clear, icons, fmtTime, fmtDur, plural, toast, toastError, confirmDialog } from "../ui.js";
@@ -36,26 +38,39 @@ export function mountReview(container, initialEp, ctx) {
   const chapterDraft = { time: null, title: "" };
   let cutSignature = "";
   const look = SHOW_LOOK[ep.show] || SHOW_LOOK["the-dig"];
+  const real = !ep.sample;
+  let hearOriginal = false;
+  // The zoom strip: a close-up of the waveform around the playhead, for long recordings.
+  const zoom = { span: 30, start: 0, peaks: [], key: "", timer: 0 };
+  const deadDraft = { longer: null, keep: null };
 
   // ------------------------------------------------------------ layout
-  const audio = h("audio", { preload: "auto", src: `${epPath(ep.id)}/audio?d=${ep.duration}` });
-  const preview = h("canvas", { width: 640, height: 360, role: "img", "aria-label": "Sample preview of the finished episode" });
+  const audioUrl = () => `${epPath(ep.id)}/audio?which=${hearOriginal ? "original" : "cleaned"}&d=${ep.duration}`;
+  const audio = h("audio", { preload: "auto", src: audioUrl() });
+  const preview = h("canvas", { width: 640, height: 360, role: "img", "aria-label": "Preview picture of the episode" });
   const playBtn = h("button", { class: "play", "aria-label": "Play", svg: icons.play, onclick: togglePlay });
   const clock = h("div", { class: "clock" });
   const finalLen = h("div", { class: "final-len" });
   const skip = h("input", { type: "checkbox", checked: true, onchange: (e) => { skipCuts = e.target.checked; } });
+  const original = h("input", { type: "checkbox", onchange: (e) => switchSound(e.target.checked) });
   const flags = h("div", { class: "flags" });
   const wave = h("canvas", { class: "wave", tabindex: "0", role: "img", "aria-label": "Waveform. Click to move the playhead; drag to select a section." });
+  const waveZoom = h("canvas", { class: "wave wave-zoom", role: "img", "aria-label": "Close-up of the waveform around the playhead. Drag to select precisely." });
+  const zoomBar = h("div", { class: "zoom-bar" });
+  const zoomArea = h("div", { class: "zoom-area" }, zoomBar, waveZoom);
   const camLabel = h("div", { class: "lane-label" }, "Camera");
   const camLane = h("div", { class: "cam-lane" });
   const selbar = h("div", { class: "selbar" });
   const deck = h("section", { class: "deck", "aria-label": "Player" },
     h("div", {}, h("div", { class: "preview" }, preview),
-      h("p", { class: "preview-note" }, "Sample preview: the real video renders arrive in Phase 3.")),
+      h("p", { class: "preview-note" }, real
+        ? "Audio only: the picture moves with the sound while you listen."
+        : "Sample preview: the real video renders arrive in Phase 3.")),
     h("div", {},
       h("div", { class: "transport" }, playBtn, clock, finalLen,
+        ep.has_original ? h("label", { class: "switch", title: "Compare with the recording before cleanup" }, original, "Hear the original") : null,
         h("label", { class: "switch" }, skip, "Skip cuts while playing")),
-      h("div", { class: "wave-area" }, flags, wave, camLabel, camLane),
+      h("div", { class: "wave-area" }, flags, wave, zoomArea, camLabel, camLane),
       selbar),
     audio);
   const script = h("section", { class: "script", "aria-label": "Transcript" }, h("p", { class: "muted" }, "Loading the transcript…"));
@@ -78,6 +93,11 @@ export function mountReview(container, initialEp, ctx) {
   const cutAt = (t) => cuts.find(([a, b]) => t >= a && t < b) || null;
 
   async function loadTranscript() {
+    if (!ep.has_transcript) {
+      paragraphs = [];
+      words = [];
+      return;
+    }
     const t = await api(`${epPath(ep.id)}/transcript?format=words`);
     paragraphs = t.paragraphs;
     words = [];
@@ -132,6 +152,7 @@ export function mountReview(container, initialEp, ctx) {
 
   // -------------------------------------------------------- transcript
   function drawScript() {
+    if (!ep.has_transcript) return drawPanel();
     const nowCut = new Set(words.filter((w) => w && w.cut).map((w) => w.i));
     clear(script);
     wordEls = new Map();
@@ -184,6 +205,79 @@ export function mountReview(container, initialEp, ctx) {
       ep.sample ? " This transcript is sample text." : ""));
     prevCut = nowCut;
     nowIndex = -1;
+  }
+
+  // A real episode before Phase 3: no transcript, so this panel holds the cold open,
+  // the sign-off and how tight the dead-air trimming is.
+  function drawPanel() {
+    clear(script);
+    const recipe = ep.show === "the-dig";
+    if (recipe) {
+      const picks = ep.picks || { cold_open: [], outro: [] };
+      const list = (key, title, about, empty) => {
+        const items = picks[key] || [];
+        const total = items.reduce((t, p) => t + p.length, 0);
+        return h("div", { class: "pick-group" },
+          h("div", { class: "side-head" }, h("h3", {}, title), h("span", {}, items.length ? fmtDur(total) : "")),
+          h("p", { class: "small muted" }, about),
+          items.length
+            ? h("ul", { class: "items" }, items.map((p, n) => h("li", { class: "item" },
+                h("div", { class: "item-main", onclick: () => seek(p.start, true), title: "Play this stretch" },
+                  h("div", { class: "item-time" }, `${n + 1}. ${p.start_text}–${p.end_text}`),
+                  h("div", { class: "item-text" }, `${p.length.toFixed(1)} s`),
+                  h("div", { class: "item-tags" }, h("span", { class: p.by === "claude" ? "tag tag-claude" : "tag" }, BY[p.by] || p.by))),
+                h("button", {
+                  class: "btn btn-quiet btn-small",
+                  onclick: () => ctx.act(() => api(`${epPath(ep.id)}/picks/${encodeURIComponent(p.id)}`, { method: "DELETE" }), (r) => r.summary),
+                }, "Remove"))))
+            : h("p", { class: "muted small" }, empty));
+      };
+      add(script, [
+        h("div", { class: "script-head" }, h("h3", {}, "How the episode opens and closes"),
+          h("p", {}, "Drag across the waveform, then choose Add to cold open or Add to sign-off.")),
+        h("div", { class: "two-col" },
+          list("cold_open", "Cold open", "Highlights that open the episode over the theme, before the sound bites.",
+            "None yet. Season Debrief Part 2 opened with three short highlights from late in the show."),
+          list("outro", "Sign-off", "Plays at the very end, after the conversation, over the theme.",
+            "None yet. Optional: the theme ends the episode either way.")),
+      ]);
+    }
+    const da = ep.dead_air || { longer_than: 1, keep: 0.5 };
+    const longer = h("input", { type: "text", inputmode: "decimal", "aria-label": "Silences longer than (seconds)", value: deadDraft.longer ?? String(da.longer_than), oninput: (e) => { deadDraft.longer = e.target.value; } });
+    const keep = h("input", { type: "text", inputmode: "decimal", "aria-label": "Shrink them to (seconds)", value: deadDraft.keep ?? String(da.keep), oninput: (e) => { deadDraft.keep = e.target.value; } });
+    const deadCuts = ep.edits.filter((e) => e.type === "cut" && e.reason === "dead air");
+    const saved = deadCuts.reduce((t, e) => t + e.length, 0);
+    add(script, [
+      h("div", { class: "script-head", style: { marginTop: recipe ? "18px" : "0" } }, h("h3", {}, "Dead air"),
+        h("p", {}, `${plural(deadCuts.length, "long silence")} shortened, ${fmtDur(saved)} out`)),
+      h("form", {
+        class: "dead-air",
+        onsubmit: async (e) => {
+          e.preventDefault();
+          const res = await ctx.act(() => api(`${epPath(ep.id)}/dead-air`, { method: "POST", body: { longer_than: Number(longer.value), keep: Number(keep.value) } }), (r) => r.summary);
+          if (res) { deadDraft.longer = null; deadDraft.keep = null; }
+        },
+      },
+        h("span", {}, "Shorten silences longer than"), longer, h("span", {}, "seconds to"), keep, h("span", {}, "seconds."),
+        h("button", { class: "btn btn-small", type: "submit" }, "Apply")),
+      h("p", { class: "small muted" }, "Smaller numbers make the conversation tighter. Cuts you brought back stay back."),
+      h("p", { class: "script-tip" },
+        "No transcript yet: transcripts arrive in Phase 3. Find moments with the waveform; the close-up under it shows ",
+        `${zoom.span} seconds around the playhead for precise selections. Keys: Space plays or pauses, the arrow keys move a second `,
+        "(Shift for five), Ctrl+Z undoes the last change."),
+    ]);
+  }
+
+  async function switchSound(toOriginal) {
+    const at = audio.currentTime;
+    const playing = !audio.paused;
+    hearOriginal = toOriginal;
+    audio.src = audioUrl();
+    audio.currentTime = at;
+    await new Promise((resolve) => audio.addEventListener("loadedmetadata", resolve, { once: true }));
+    audio.currentTime = at;
+    if (playing) audio.play().catch(() => {});
+    toast(toOriginal ? "Playing the original recording (before cleanup)." : "Playing the cleaned sound.", {});
   }
 
   function onScriptClick(e) {
@@ -258,8 +352,26 @@ export function mountReview(container, initialEp, ctx) {
     const removed = Math.max(0, (ep.duration || 0) - (ep.final_duration || 0));
     const cutsSec = h("section", {},
       h("div", { class: "side-head" }, h("h3", {}, "Cuts"), h("span", {}, `${plural(cutEdits.length, "cut")}, ${fmtDur(removed)} out`)));
+    const cutItem = (e) => h("li", { class: "item" },
+      h("div", { class: "item-main", onclick: () => seek(Math.max(0, e.start - 1.5)), title: "Jump to this cut" },
+        h("div", { class: "item-time" }, `${e.start_text}–${e.end_text}`),
+        h("div", { class: "item-text", title: e.text || "" }, e.text || REASON[e.reason] || "Cut"),
+        h("div", { class: "item-tags" },
+          h("span", { class: "tag tag-cut" }, REASON[e.reason] || "Cut"),
+          h("span", { class: e.by === "claude" ? "tag tag-claude" : "tag" }, BY[e.by] || e.by))),
+      h("button", { class: "btn btn-quiet btn-small", onclick: () => restore(e) }, "Bring back"));
+    const dead = cutEdits.filter((e) => e.reason === "dead air" && e.by === "auto");
     if (!cutEdits.length) {
-      cutsSec.append(h("p", { class: "muted small" }, "No cuts yet. Select words in the transcript, or drag across the waveform."));
+      cutsSec.append(h("p", { class: "muted small" }, ep.has_transcript
+        ? "No cuts yet. Select words in the transcript, or drag across the waveform."
+        : "No cuts yet. Drag across the waveform to select a section, then Cut section."));
+    } else if (dead.length > 8) {
+      const others = cutEdits.filter((e) => !dead.includes(e));
+      const deadTime = dead.reduce((t, e) => t + e.length, 0);
+      if (others.length) cutsSec.append(h("ul", { class: "items" }, others.map(cutItem)));
+      cutsSec.append(h("details", { class: "dead-list" },
+        h("summary", {}, `${plural(dead.length, "dead-air cut")} suggested by Cutzo (${fmtDur(deadTime)})`),
+        h("ul", { class: "items" }, dead.map(cutItem))));
     } else {
       cutsSec.append(h("ul", { class: "items" }, cutEdits.map((e) => h("li", { class: "item" },
         h("div", { class: "item-main", onclick: () => seek(Math.max(0, e.start - 1.5)), title: "Jump to this cut" },
@@ -322,8 +434,9 @@ export function mountReview(container, initialEp, ctx) {
 
     const yt = h("textarea", { class: "copybox", readonly: true, "aria-label": "YouTube chapters" });
     yt.value = ep.youtube_chapters || "";
+    const video = ep.show === "the-new-heretics";
     const youtube = h("section", {},
-      h("div", { class: "side-head" }, h("h3", {}, "For YouTube"),
+      h("div", { class: "side-head" }, h("h3", {}, video ? "For YouTube" : "Chapter list"),
         h("button", {
           class: "btn btn-quiet btn-small",
           onclick: async () => {
@@ -336,7 +449,8 @@ export function mountReview(container, initialEp, ctx) {
             }
           },
         }, "Copy")),
-      h("p", { class: "small muted" }, "Paste into the video description. Times match the finished file."),
+      h("p", { class: "small muted" }, video ? "Paste into the video description. Times match the finished file."
+        : "Paste into the episode notes. Times match the finished file, intro and breaks included."),
       yt,
       ep.chapter_warnings && ep.chapter_warnings.length ? h("ul", { class: "warn-list" }, ep.chapter_warnings.map((w) => h("li", {}, w))) : null);
     add(side, [cutsSec, chapters, youtube]);
@@ -397,6 +511,7 @@ export function mountReview(container, initialEp, ctx) {
 
   function seek(t, play = false) {
     audio.currentTime = Math.max(0, Math.min(duration - 0.05, t));
+    follow(audio.currentTime);
     if (!chapterTimeTouched) {
       const input = document.getElementById("chapter-time");
       if (input && document.activeElement !== input) input.value = fmtTime(t);
@@ -447,7 +562,9 @@ export function mountReview(container, initialEp, ctx) {
   function drawSelbar() {
     clear(selbar);
     if (!selection) {
-      selbar.append(h("span", {}, "Drag across the waveform to select a section, or select words in the transcript."));
+      selbar.append(h("span", {}, ep.has_transcript
+        ? "Drag across the waveform to select a section, or select words in the transcript."
+        : "Drag across the waveform (or the close-up under it) to select a section."));
       return;
     }
     const { a, b } = selection;
@@ -456,6 +573,13 @@ export function mountReview(container, initialEp, ctx) {
       h("button", { class: "btn btn-cut btn-small", onclick: () => cutRange(a, b, selection.source === "text" ? "words" : "manual") }, "Cut section"),
       h("button", { class: "btn btn-small", onclick: () => prefillChapter(a) }, "Add chapter at start"),
     ];
+    if (real && ep.show === "the-dig") {
+      const pick = (kind) => ctx.act(() => api(`${epPath(ep.id)}/picks`, { method: "POST", body: { kind, start: a, end: b } }),
+        (r) => `${r.summary}. Now ${r.total}.`).then((r) => { if (r) { selection = null; drawSelbar(); draw(true); } });
+      parts.push(
+        h("button", { class: "btn btn-small", onclick: () => pick("cold_open") }, "Add to cold open"),
+        h("button", { class: "btn btn-small", onclick: () => pick("outro") }, "Add to sign-off"));
+    }
     if ((ep.cameras || []).length) {
       const pick = h("select", { "aria-label": "Camera", style: { width: "auto", padding: "6px 8px" } }, ep.cameras.map((c) => h("option", { value: c }, c)));
       parts.push(pick, h("button", {
@@ -483,21 +607,26 @@ export function mountReview(container, initialEp, ctx) {
   }
 
   // ------------------------------------------------------------- waveform
-  const tAt = (clientX) => {
-    const r = wave.getBoundingClientRect();
-    return Math.max(0, Math.min(duration, ((clientX - r.left) / r.width) * duration));
+  // Both strips share the drawing and the mouse handling; each shows the stretch a..b.
+  const spanOf = (canvas) => (canvas === waveZoom ? [zoom.a ?? zoom.start, zoom.b ?? zoom.start + zoom.span] : [0, duration]);
+  const tAt = (canvas, clientX) => {
+    const r = canvas.getBoundingClientRect();
+    const [a, b] = spanOf(canvas);
+    return Math.max(0, Math.min(duration, a + ((clientX - r.left) / r.width) * (b - a)));
   };
 
-  wave.addEventListener("mousedown", (e) => {
-    drag = { x: e.clientX, t: tAt(e.clientX) };
-    hideFloat();
-  });
+  for (const canvas of [wave, waveZoom]) {
+    canvas.addEventListener("mousedown", (e) => {
+      drag = { canvas, x: e.clientX, t: tAt(canvas, e.clientX) };
+      hideFloat();
+    });
+  }
   window.addEventListener("mousemove", onDragMove);
   window.addEventListener("mouseup", onDragEnd);
   function onDragMove(e) {
     if (!drag) return;
     if (Math.abs(e.clientX - drag.x) < 4) return;
-    const t = tAt(e.clientX);
+    const t = tAt(drag.canvas, e.clientX);
     selection = { a: Math.min(drag.t, t), b: Math.max(drag.t, t), source: "wave" };
     draw(true);
   }
@@ -507,6 +636,7 @@ export function mountReview(container, initialEp, ctx) {
     if (!moved) {
       selection = null;
       seek(drag.t);
+      if (drag.canvas === wave) follow(drag.t, true);
     }
     drag = null;
     drawSelbar();
@@ -523,30 +653,32 @@ export function mountReview(container, initialEp, ctx) {
     return dpr;
   }
 
-  function drawWave() {
-    const dpr = sizeCanvas(wave, 128);
-    const g = wave.getContext("2d");
-    const W = wave.width;
-    const H = wave.height;
+  function paintWave(canvas, cssHeight, a, b, bars, { window: frame = null, ticks = false } = {}) {
+    const dpr = sizeCanvas(canvas, cssHeight);
+    const g = canvas.getContext("2d");
+    const W = canvas.width;
+    const H = canvas.height;
     g.clearRect(0, 0, W, H);
-    const x = (t) => (t / duration) * W;
+    const span = Math.max(0.001, b - a);
+    const x = (t) => ((t - a) / span) * W;
     const now = audio.currentTime;
     const mid = H / 2;
-    const n = peaks.length || 1;
+    const n = bars.length || 1;
     const step = W / n;
     const barW = Math.max(1, step * 0.62);
-    for (let i = 0; i < peaks.length; i++) {
-      const t = ((i + 0.5) / n) * duration;
+    for (let i = 0; i < bars.length; i++) {
+      const t = a + ((i + 0.5) / n) * span;
       const inCut = cutAt(t);
-      const amp = Math.max(1 * dpr, peaks[i] * (H * 0.46));
+      const amp = Math.max(1 * dpr, bars[i] * (H * 0.46));
       g.fillStyle = inCut ? "rgba(236, 238, 241, 0.16)" : t <= now ? "#ffffff" : "#9aa2ae";
       g.fillRect(i * step, mid - amp, barW, amp * 2);
     }
     // Spliced-out cuts: slanted edges, like tape cut on a splicing block.
     const slant = 7 * dpr;
-    for (const [a, b] of cuts) {
-      const x0 = x(a);
-      const x1 = Math.max(x(b), x0 + 2 * dpr);
+    for (const [ca, cb] of cuts) {
+      if (cb < a || ca > b) continue;
+      const x0 = x(ca);
+      const x1 = Math.max(x(cb), x0 + 2 * dpr);
       g.beginPath();
       g.moveTo(x0 + slant, 0);
       g.lineTo(x1 + slant, 0);
@@ -575,19 +707,44 @@ export function mountReview(container, initialEp, ctx) {
       g.lineTo(x1 - slant, H);
       g.stroke();
     }
+    // Cold open and sign-off picks: a gold band along the bottom.
+    const picks = ep.picks || {};
+    g.fillStyle = "rgba(232, 184, 90, 0.9)";
+    for (const p of [...(picks.cold_open || []), ...(picks.outro || [])]) {
+      if (p.end < a || p.start > b) continue;
+      g.fillRect(x(p.start), H - 5 * dpr, Math.max(2 * dpr, x(p.end) - x(p.start)), 5 * dpr);
+    }
     // Chapter marks
     g.strokeStyle = "rgba(236, 238, 241, 0.55)";
     g.setLineDash([3 * dpr, 4 * dpr]);
     g.lineWidth = 1 * dpr;
     for (const c of ep.chapters) {
+      if (c.time < a || c.time > b) continue;
       g.beginPath();
       g.moveTo(x(c.time) + 0.5, 0);
       g.lineTo(x(c.time) + 0.5, H);
       g.stroke();
     }
     g.setLineDash([]);
+    // Time marks on the close-up, so precise selections are easy.
+    if (ticks) {
+      const every = span <= 12 ? 1 : span <= 40 ? 5 : span <= 150 ? 15 : 60;
+      g.fillStyle = "rgba(236, 238, 241, 0.6)";
+      g.font = `${11 * dpr}px "Atkinson Hyperlegible Next", sans-serif`;
+      g.textBaseline = "top";
+      for (let t = Math.ceil(a / every) * every; t <= b; t += every) {
+        g.fillRect(x(t), 0, 1 * dpr, 5 * dpr);
+        g.fillText(fmtTime(t), x(t) + 3 * dpr, 2 * dpr);
+      }
+    }
+    // Where the close-up is, on the full waveform.
+    if (frame) {
+      g.strokeStyle = "rgba(232, 184, 90, 0.85)";
+      g.lineWidth = 1.5 * dpr;
+      g.strokeRect(x(frame[0]), 1 * dpr, Math.max(3 * dpr, x(frame[1]) - x(frame[0])), H - 2 * dpr);
+    }
     // Selection
-    if (selection) {
+    if (selection && selection.b >= a && selection.a <= b) {
       g.fillStyle = "rgba(255, 255, 255, 0.16)";
       g.fillRect(x(selection.a), 0, x(selection.b) - x(selection.a), H);
       g.fillStyle = "#ffffff";
@@ -595,15 +752,73 @@ export function mountReview(container, initialEp, ctx) {
       g.fillRect(x(selection.b) - 1.5 * dpr, 0, 1.5 * dpr, H);
     }
     // Playhead
-    const px = x(now);
-    g.fillStyle = "#ffffff";
-    g.fillRect(px - 1 * dpr, 0, 2 * dpr, H);
-    g.beginPath();
-    g.moveTo(px - 6 * dpr, 0);
-    g.lineTo(px + 6 * dpr, 0);
-    g.lineTo(px, 8 * dpr);
-    g.closePath();
-    g.fill();
+    if (now >= a && now <= b) {
+      const px = x(now);
+      g.fillStyle = "#ffffff";
+      g.fillRect(px - 1 * dpr, 0, 2 * dpr, H);
+      g.beginPath();
+      g.moveTo(px - 6 * dpr, 0);
+      g.lineTo(px + 6 * dpr, 0);
+      g.lineTo(px, 8 * dpr);
+      g.closePath();
+      g.fill();
+    }
+  }
+
+  function drawWave() {
+    const zoomed = zoomOn();
+    paintWave(wave, 128, 0, duration, peaks, { window: zoomed ? [zoom.a ?? zoom.start, zoom.b ?? zoom.start + zoom.span] : null });
+    if (zoomed) paintWave(waveZoom, 96, zoom.a ?? zoom.start, zoom.b ?? zoom.start + zoom.span, zoom.peaks, { ticks: true });
+  }
+
+  // ------------------------------------------------------------ zoom strip
+  const zoomOn = () => duration > 180;
+  function drawZoomBar() {
+    clear(zoomBar);
+    zoomArea.hidden = !zoomOn();
+    if (!zoomOn()) return;
+    zoomBar.append(h("span", { class: "lane-label" }, "Close-up"),
+      ...[10, 30, 120].map((sec) => h("button", {
+        class: "chip",
+        "aria-pressed": zoom.span === sec ? "true" : "false",
+        onclick: () => { zoom.span = sec; follow(audio.currentTime, true); drawZoomBar(); drawScriptTipSpan(); },
+      }, sec < 60 ? `${sec} s` : `${sec / 60} min`)));
+  }
+  function drawScriptTipSpan() {
+    if (!ep.has_transcript) drawPanel();
+  }
+  function follow(t, force = false) {
+    if (!zoomOn()) return;
+    const span = Math.min(zoom.span, duration);
+    let start = zoom.start;
+    if (force || t < start || t > start + span * 0.97) start = Math.max(0, Math.min(duration - span, t - span * 0.1));
+    if (force || start !== zoom.start || !zoom.peaks.length) {
+      zoom.start = start;
+      zoom.a = start;
+      zoom.b = start + span;
+      loadZoom();
+    }
+  }
+  function loadZoom() {
+    clearTimeout(zoom.timer);
+    zoom.timer = setTimeout(async () => {
+      const a = zoom.start;
+      const b = Math.min(duration, zoom.start + zoom.span);
+      const width = Math.max(200, Math.min(4000, Math.round(waveZoom.clientWidth || 800)));
+      const key = `${a.toFixed(2)}-${b.toFixed(2)}-${width}`;
+      if (key === zoom.key) return;
+      try {
+        const w = await api(`${epPath(ep.id)}/waveform?buckets=${width}&start=${a.toFixed(3)}&end=${b.toFixed(3)}`);
+        if (destroyed) return;
+        zoom.peaks = w.peaks;
+        zoom.key = key;
+        zoom.a = w.start;
+        zoom.b = w.end;
+        draw(true);
+      } catch {
+        /* the next move tries again */
+      }
+    }, 120);
   }
 
   // -------------------------------------------------------------- preview
@@ -728,7 +943,9 @@ export function mountReview(container, initialEp, ctx) {
   // ---------------------------------------------------------------- loop
   function updateClock() {
     clock.replaceChildren(fmtTime(audio.currentTime, true), h("span", {}, ` / ${fmtTime(duration, true)}`));
-    finalLen.replaceChildren("After cuts ", h("b", {}, fmtTime(ep.final_duration || 0)));
+    finalLen.replaceChildren(...(ep.finished_duration
+      ? ["Finished file ", h("b", { title: "With the intro, breaks and ending" }, fmtTime(ep.finished_duration))]
+      : ["After cuts ", h("b", {}, fmtTime(ep.final_duration || 0))]));
     if (!chapterTimeTouched && !audio.paused) {
       const input = document.getElementById("chapter-time");
       if (input && document.activeElement !== input) input.value = fmtTime(audio.currentTime);
@@ -752,6 +969,7 @@ export function mountReview(container, initialEp, ctx) {
       const c = cutAt(audio.currentTime);
       if (c) audio.currentTime = Math.min(c[1] + 0.001, duration);
     }
+    if (!audio.paused) follow(audio.currentTime);
     draw();
   }
 
@@ -779,7 +997,11 @@ export function mountReview(container, initialEp, ctx) {
   function onDocDown(e) {
     if (!floatBar.hidden && !floatBar.contains(e.target)) hideFloat();
   }
-  const onResize = () => draw(true);
+  const onResize = () => {
+    zoom.key = "";
+    if (zoomOn()) loadZoom();
+    draw(true);
+  };
 
   script.addEventListener("click", onScriptClick);
   script.addEventListener("mouseup", () => setTimeout(onScriptSelect, 0));
@@ -805,6 +1027,8 @@ export function mountReview(container, initialEp, ctx) {
     drawFlags();
     drawCamLane();
     drawSelbar();
+    drawZoomBar();
+    follow(0, true);
     if (document.fonts && document.fonts.load) {
       Promise.all([
         document.fonts.load('800 34px "Big Shoulders Display"'),
@@ -829,8 +1053,11 @@ export function mountReview(container, initialEp, ctx) {
         return;
       }
       if (rebuilt) {
-        audio.src = `${epPath(ep.id)}/audio?d=${ep.duration}`;
+        audio.src = audioUrl();
         prevCut = null;
+        zoom.key = "";
+        drawZoomBar();
+        follow(audio.currentTime || 0, true);
       }
       if (destroyed) return;
       if (cutsChanged || rebuilt) {

@@ -191,10 +191,13 @@ def dead_air_cuts(silences: list[tuple[float, float]], *, longer_than: float, ke
 
 
 def suggest_threshold(env: np.ndarray) -> float:
-    """Where "silence" starts for this recording: between the noise floor and the speech level,
-    nearer the floor, and never above 30 dB under the speech level."""
+    """Where "silence" starts for this recording: 40% of the way from the noise floor up to the
+    speech level, but at least 18 dB under the speech and at least 4 dB above the floor."""
     floor, speech = noise_floor(env), speech_level(env)
-    return round(min(floor + 0.35 * (speech - floor), speech - 30.0), 1) if speech > floor else round(floor + 6, 1)
+    if speech <= floor + 8:
+        return round(floor + 4, 1)
+    guess = min(floor + 0.4 * (speech - floor), speech - 18.0)
+    return round(max(guess, floor + 4.0), 1)
 
 
 # -------------------------------------------------------------------- syncing

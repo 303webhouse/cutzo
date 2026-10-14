@@ -267,6 +267,7 @@ p { margin: 0 0 10px; }
 .chain i.done { background: var(--tally); }
 .chain i.current, .chain i.ready { background: var(--ink); }
 .chain i.running { background: var(--claude); animation: pulse 1.2s ease-in-out infinite; }
+.chain i.later { background: transparent; box-shadow: inset 0 0 0 1px var(--rule-strong); }
 @keyframes pulse { 50% { opacity: 0.35; } }
 
 /* ---------------------------------------------------- episode head */
@@ -292,6 +293,8 @@ p { margin: 0 0 10px; }
 .stages .current, .stages .ready { color: var(--ink); }
 .stages .current .mark, .stages .ready .mark { border-color: var(--ink); box-shadow: 0 0 0 3px var(--halo); }
 .stages .running .mark { border-color: var(--claude); border-style: dashed; animation: spin 2.4s linear infinite; }
+.stages .later .mark { border-style: dashed; }
+.later-note { font-weight: 400; color: var(--ink-soft); }
 @keyframes spin { to { transform: rotate(360deg); } }
 .next-step {
   margin: 18px 0 0;
@@ -359,6 +362,13 @@ p { margin: 0 0 10px; }
 .flag:hover { color: #fff; }
 .wave { display: block; width: 100%; height: 128px; cursor: crosshair; border-radius: var(--r-sm); }
 .lane-label { font-size: var(--s-2); color: var(--deck-muted); margin: 10px 0 4px; }
+.zoom-area { margin-top: 10px; }
+.zoom-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.zoom-bar .lane-label { margin: 0 6px 0 0; }
+.chip { font: 700 var(--s-2)/1 var(--text); padding: 5px 9px; border-radius: 999px; border: 1px solid var(--deck-line); background: var(--deck-raised); color: var(--deck-muted); cursor: pointer; }
+.chip:hover { color: var(--deck-text); }
+.chip[aria-pressed="true"] { background: var(--deck-text); border-color: var(--deck-text); color: var(--deck); }
+.wave-zoom { height: 96px; }
 .cam-lane { height: 22px; position: relative; border-radius: 4px; overflow: hidden; background: var(--deck-raised); }
 .cam-seg { position: absolute; top: 0; bottom: 0; font-size: 11px; font-weight: 700; padding: 0 6px; line-height: 22px; white-space: nowrap; overflow: hidden; color: #111; border-right: 1px solid var(--deck); }
 .selbar { display: flex; gap: 10px; align-items: center; margin-top: 10px; min-height: 36px; font-size: var(--s-1); color: var(--deck-muted); flex-wrap: wrap; }
@@ -424,6 +434,11 @@ p { margin: 0 0 10px; }
 .add-chapter { display: grid; grid-template-columns: 84px minmax(0, 1fr) auto; gap: 8px; margin-top: 12px; }
 .add-chapter input { padding: 8px 10px; }
 .copybox { width: 100%; min-height: 92px; font-size: var(--s-1); font-variant-numeric: tabular-nums; resize: vertical; }
+.dead-list { margin-top: 10px; }
+.dead-list summary { cursor: pointer; font-weight: 700; font-size: var(--s-1); padding: 6px 0; }
+.dead-air { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 8px; }
+.dead-air input[type="text"] { width: 64px; padding: 6px 8px; text-align: center; }
+.pick-group .items { margin-top: 4px; }
 .warn-list { margin: 8px 0 0; padding: 0 0 0 18px; color: var(--warn-ink); font-size: var(--s-1); }
 
 /* ----------------------------------------------------------- forms */

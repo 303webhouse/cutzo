@@ -911,7 +911,12 @@ class Cutzo:
         self._log(source, "add_chapter", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
         show = showlib.get_show(ep["show"]) or {}
         voiced = showlib.segment_title_for(show, title)
-        return {"chapter": self._chapter_view(chapter, ep, show), "summary": summary,
+        layout = self._layout(ep, show)
+        at = None
+        if layout:
+            ordered = sorted(ep["chapters"], key=lambda c: c["time"])
+            at = layout.chapters[[c["id"] for c in ordered].index(chapter["id"])]["time"]
+        return {"chapter": self._chapter_view(chapter, ep, show, at), "summary": summary,
                 "voiced_title": voiced["name"] if voiced else None}
 
     def remove_chapter(self, episode: str, chapter_id: str, source: str = "you") -> dict[str, Any]:
@@ -1695,9 +1700,21 @@ class Cutzo:
         v["length"] = round(e["end"] - e["start"], 3)
         return v
 
-    def _chapter_view(self, c: dict[str, Any], ep: dict[str, Any], show: dict[str, Any]) -> dict[str, Any]:
+    def _layout(self, ep: dict[str, Any], show: dict[str, Any]) -> Any:
+        """The finished file's layout (intro, breaks, ending) without touching any media: used for
+        chapter times and the finished length. None for sample episodes and shows without a recipe."""
+        if ep.get("sample") or not ep.get("duration") or not show.get("recipe"):
+            return None
+        try:
+            return recipes.plan_episode(ep, show, voice_path=Path("voice.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
+                                        kit_file=lambda asset: Path(asset), length_of=lambda asset: 1e9)
+        except CutzoError:
+            return None
+
+    def _chapter_view(self, c: dict[str, Any], ep: dict[str, Any], show: dict[str, Any],
+                      layout_time: float | None = None) -> dict[str, Any]:
         cuts = self._cuts(ep)
-        out_t = timeline.to_output(c["time"], cuts)
+        out_t = layout_time if layout_time is not None else timeline.to_output(c["time"], cuts)
         voiced = showlib.segment_title_for(show, c["title"])
         return {**c, "time_text": fmt_time(c["time"]), "output_time": out_t, "output_text": fmt_time(out_t),
                 "voiced_title": voiced["name"] if voiced else None}
@@ -1705,7 +1722,14 @@ class Cutzo:
     def _view(self, ep: dict[str, Any]) -> dict[str, Any]:
         show = showlib.get_show(ep["show"]) or {}
         view = self._summary(ep)
-        chapters = [self._chapter_view(c, ep, show) for c in sorted(ep.get("chapters", []), key=lambda c: c["time"])]
+        layout = self._layout(ep, show)
+        ordered = sorted(ep.get("chapters", []), key=lambda c: c["time"])
+        chapters = [self._chapter_view(c, ep, show, layout.chapters[k]["time"] if layout else None)
+                    for k, c in enumerate(ordered)]
+        if layout:
+            view["finished_duration"] = round(layout.total, 3)
+            view["finished_text"] = fmt_duration(layout.total)
+            view["layout"] = recipes.describe(layout)
         warnings = []
         if chapters:
             if chapters[0]["output_time"] > 0.5:
