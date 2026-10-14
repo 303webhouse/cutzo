@@ -48,6 +48,15 @@ def write_mp3(path: Path, samples: np.ndarray):
 
 
 # ------------------------------------------------------------------ tools
+def test_modules_import_on_their_own():
+    # Lab scripts and setup import cutzo.tools first; that must not trip over cutzo.core.
+    import sys
+
+    for stmt in ("from cutzo.tools import ffmpeg", "import cutzo.tools.install", "from cutzo.core import audio"):
+        done = subprocess.run([sys.executable, "-c", stmt], capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+
+
 def test_tool_registry_and_status():
     assert tools.platform_key().count("-") == 1
     names = {t["tool"] for t in tools.status()}

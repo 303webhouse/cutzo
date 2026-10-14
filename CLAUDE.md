@@ -102,7 +102,7 @@ for real episodes until Phase 3. New outside programs get their own wrapper in `
 uv venv --python 3.12 --python-preference only-managed .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
 .venv/bin/python -m cutzo.tools.install   (FFmpeg and DeepFilterNet into ./tools)
-.venv/bin/python -m pytest             (all tests, about 2.5 minutes; real-audio tests skip
+.venv/bin/python -m pytest             (all tests, about 3 minutes; real-audio tests skip
                                         themselves when FFmpeg isn't installed)
 .venv/bin/python -m cutzo.engine --speed 0.1   (engine with 10x faster pretend jobs)
 ```
