@@ -376,6 +376,65 @@ def test_real_build_review_and_export(real_episode):
         app.export(ep_id, ["podcast-mp3"])
 
 
+def write_wav(path: Path, samples: np.ndarray) -> Path:
+    import wave
+
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(RATE)
+        w.writeframes((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
+    return path
+
+
+def bursts(seed: int, total: float) -> np.ndarray:
+    """One person's track: talk bursts of random lengths with random pauses (no repeating pattern)."""
+    rng = np.random.default_rng(seed)
+    out = rng.normal(0, 0.0005, int(total * RATE)).astype(np.float32)
+    t = 0.5
+    while t < total - 3.5:
+        length = float(rng.uniform(1.0, 3.0))
+        n = int(length * RATE)
+        a = int(t * RATE)
+        out[a:a + n] += tone(length, 150 + 100 * rng.random(), 0.3)[:n] * (0.6 + 0.4 * np.sin(np.linspace(0, 15, n)))
+        t += length + float(rng.uniform(1.5, 4.0))
+    return out
+
+
+@needs_ffmpeg
+def test_streamyard_tracks_are_lined_up_by_sound(tmp_path):
+    from cutzo.core import Cutzo
+
+    alice, bob = bursts(11, 40.0), bursts(12, 38.0)
+    true_a, true_b = 1.40, 0.30  # where each track really starts in the combined recording
+    mix = np.zeros(int(42.0 * RATE), dtype=np.float32)
+    for track, off in ((alice, true_a), (bob, true_b)):
+        a = int(round(off * RATE))
+        mix[a:a + len(track)] += track
+    folder = tmp_path / "raw"
+    folder.mkdir()
+    write_wav(folder / "Test-Alice_Smith-audio-00h_00m_01s_250ms-StreamYard.wav", alice)  # the name is 0.15 s early
+    write_wav(folder / "Test-Bob_Jones-audio-00h_00m_00s_300ms-StreamYard.wav", bob)
+    write_mp3(folder / "Test StreamYard.mp3", mix)
+    app = Cutzo(tmp_path / "library", speed=0.0)
+    try:
+        ep_id = app.create_episode(show="The Dig", title="Tracks")["episode"]["id"]
+        app.jobs.wait(app.import_media(ep_id, [str(folder)])["job"]["id"], 60)
+        app.set_voice(ep_id, 0)
+        job = app.jobs.wait(app.build_episode(ep_id)["job"]["id"], 300)
+        assert job["status"] == "done", job.get("error")
+        ep = app.get_episode(ep_id)
+        sync = {m["person"] or m["name"]: m["sync"] for m in ep["media"]}
+        # Recording time starts with the earliest track (Bob's); Alice's slip in her file name is corrected.
+        assert sync["Bob Jones"]["used"] and sync["Bob Jones"]["offset"] == pytest.approx(0.0, abs=0.02)
+        assert sync["Alice Smith"]["offset"] == pytest.approx(true_a - true_b, abs=0.02)
+        assert sync["Alice Smith"]["method"].startswith("Matched by sound")
+        assert sync["Test StreamYard.mp3"]["used"] is False  # the combined recording only helps line things up
+        assert ep["duration"] == pytest.approx(true_a - true_b + 40.0, abs=0.1)
+    finally:
+        app.jobs.shutdown()
+
+
 def test_engine_routes_for_real_episodes(real_episode):
     from fastapi.testclient import TestClient
 
