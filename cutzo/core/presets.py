@@ -1,8 +1,9 @@
 """Export targets and the rules each finished file is checked against.
 
 Specs from the plan doc's Build Notes (YouTube, Substack and Apple pages,
-checked Oct 12-13, 2026). Phase 1 shows the rules; from Phase 2 the check runs
-ffprobe and a loudness scan on the real file.
+checked Oct 12-13, 2026). Sample episodes only show the rules. For real episodes,
+audio targets carry a "spec" that the finished file is measured against
+(ffprobe for the format, a loudness scan for the level); video arrives in Phase 3.
 """
 
 from __future__ import annotations
@@ -70,9 +71,15 @@ PRESETS: list[dict[str, Any]] = [
         "gb_per_hour": 0.06,
         "rules": [
             ("File type", "MP3"),
-            ("Audio", "Stereo, 44.1 kHz, 128 kbps (matched to your current files in Phase 2)"),
-            ("Loudness", "-16 LUFS (plus or minus 1), peaks at or below -1 dBTP"),
+            ("Channels", "Stereo"),
+            ("Sample rate", "48 kHz (like your Season Debrief Part 2 file)"),
+            ("Bitrate", "128 kbps"),
+            ("Loudness", "-16 LUFS (plus or minus 1)"),
+            ("Peaks", "at or below -1 dBTP"),
         ],
+        # What the finished file must measure (checked with ffprobe and a loudness scan).
+        "spec": {"codec": "mp3", "format": "mp3", "channels": 2, "rate": 48000, "bitrate_kbps": 128,
+                 "loudness": -16.0, "loudness_tolerance": 1.0, "true_peak_max": -1.0},
     },
     {
         "id": "podcast-aac",
@@ -80,12 +87,17 @@ PRESETS: list[dict[str, Any]] = [
         "kind": "audio",
         "ext": "m4a",
         "summary": "Same audio as AAC, which Apple Podcasts prefers over MP3.",
-        "gb_per_hour": 0.09,
+        "gb_per_hour": 0.07,
         "rules": [
-            ("File type", "M4A (AAC)"),
-            ("Audio", "Stereo, 44.1 or 48 kHz, 128-256 kbps"),
-            ("Loudness", "-16 LUFS (plus or minus 1), peaks at or below -1 dBTP"),
+            ("File type", "AAC (M4A)"),
+            ("Channels", "Stereo"),
+            ("Sample rate", "48 kHz"),
+            ("Bitrate", "160 kbps"),
+            ("Loudness", "-16 LUFS (plus or minus 1)"),
+            ("Peaks", "at or below -1 dBTP"),
         ],
+        "spec": {"codec": "aac", "format": "mp4", "channels": 2, "rate": 48000, "bitrate_kbps": 160,
+                 "loudness": -16.0, "loudness_tolerance": 1.0, "true_peak_max": -1.0},
     },
     {
         "id": "spotify-video",

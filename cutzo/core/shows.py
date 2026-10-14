@@ -14,9 +14,8 @@ from . import kit
 
 _BACKGROUNDS = ["tnh-bg-loop-1hr", "tnh-fire-loop-1min", "tnh-fire-loop", "tnh-bg-master",
                 "tnh-full-flames", "tnh-streaking-fire"]
-_DIG_INTROS = ["dig-intro-gabe", "dig-intro-doug-moe", "dig-intro-take-that-l", "dig-intro-not-meant"]
-_DIG_SFX = ["dig-sfx-three-digs", "dig-sfx-twolves-win", "dig-sfx-national-anthem", "dig-sfx-tom-haiku-intro",
-            "dig-sfx-mining-chops", "dig-sfx-untitled"]
+_DIG_SFX = ["dig-sfx-mining-chops", "dig-sfx-three-digs", "dig-sfx-twolves-win", "dig-sfx-national-anthem",
+            "dig-sfx-tom-haiku-intro", "dig-sfx-untitled"]
 
 SHOWS: list[dict[str, Any]] = [
     {
@@ -32,11 +31,15 @@ SHOWS: list[dict[str, Any]] = [
         "outputs": ["podcast-mp3"],
         "voice": {"preset": "Podcast voice", "strength": 70},
         "loudness": {"podcast": -16, "video": -14},
+        # Episode layout copied from Season Debrief Part 2 in Premiere (see recipes.py).
+        "recipe": "the-dig",
         "slots": [
-            {"slot": "intro", "label": "Intro clip", "default": "dig-intro-gabe", "choices": _DIG_INTROS + ["none"],
-             "note": "Plays before the conversation. Order and mix get confirmed in Phase 2."},
-            {"slot": "segment_sound", "label": "Segment sound", "default": "dig-sfx-three-digs",
-             "choices": _DIG_SFX + ["none"], "note": "Plays at each chapter mark."},
+            {"slot": "theme", "label": "Theme music", "default": "dig-theme", "choices": ["dig-theme", "none"],
+             "note": "Under the cold open, between segments and at the end, like Season Debrief Part 2."},
+            {"slot": "montage", "label": "Intro sound bites", "default": "dig-montage", "choices": ["dig-montage", "none"],
+             "note": "Plays after the cold open, before the conversation starts."},
+            {"slot": "stinger", "label": "Segment stinger", "default": "dig-sfx-mining-chops",
+             "choices": _DIG_SFX + ["none"], "note": "Plays right before each new segment (each chapter after the first)."},
             {"slot": "cover", "label": "Cover art", "default": "dig-jok-banner", "choices": ["dig-jok-banner"],
              "note": "Used if you ever post an episode to YouTube with a still image."},
         ],

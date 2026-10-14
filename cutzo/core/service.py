@@ -3,9 +3,10 @@
 The web engine (cutzo.engine) and the Claude connector (cutzo.mcp_server) are
 thin wrappers around this class, so the screens and Claude can never drift apart.
 
-Phase 1: the editing model is real (cuts, chapters, camera choices, undo,
-safety rules, activity log), while the heavy media work (sync, voice cleanup,
-transcription, rendering) is pretended with timed steps and sample data.
+Sample episodes (Phase 1) still pretend the heavy media work with timed steps.
+Real episodes (Phase 2 on) are built for real: FFmpeg reads and lines up the
+recordings, DeepFilterNet and FFmpeg clean the voices, and dead air is found in
+the cleaned audio (see build.py and voice.py). Transcripts arrive in Phase 3.
 """
 
 from __future__ import annotations
@@ -22,7 +23,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .. import PHASE, __version__
-from . import kit, presets, sample, timeline
+from .. import tools as toolbox
+from ..tools import ffmpeg
+from . import audio, kit, presets, recipes, render, sample, timeline
+from . import build as buildlib
 from . import shows as showlib
 from . import transcript as tx
 from .activity import ActivityLog
@@ -32,6 +36,7 @@ from .media import classify, kind_of, scan_folder
 from .safety import Guard
 from .storage import read_json, write_json
 from .timecode import fmt_duration, fmt_time, parse_time
+from .voice import VoiceSettings
 
 log = logging.getLogger("cutzo")
 
@@ -57,9 +62,15 @@ VOICE_CHAIN = ["Rumble filter (80 Hz)", "Noise removal", "Room echo removal", "V
                "De-essing", "Gentle compression", "Leveling"]
 BIG_CUT_SECONDS = 600.0
 BIG_CUT_SHARE = 0.25
-PHASE1_NOTE = "Phase 1 preview: sample data, nothing is rendered and your real files are never touched."
-EXPORT_NOTE = "Phase 1: the export is pretend, so no file is written. Real files start in Phase 2."
-BUILD_NOTE = "Phase 1: the steps are pretend and use a short test clip instead of the real recording."
+PHASE1_NOTE = "Sample episode: pretend data, nothing is rendered and your real files are never touched."
+SAMPLE_EXPORT_NOTE = "Sample episode: the export is pretend, so no file is written."
+SAMPLE_BUILD_NOTE = "Sample episode: the steps are pretend and use a short test clip instead of a real recording."
+REAL_NOTE = ("Real episode: Cutzo reads your recordings (never changes them), cleans the voices and finds dead air. "
+             "Transcripts arrive in Phase 3.")
+REAL_BUILD_NOTE = "Lines up the recordings, cleans the voices and finds dead air. A long episode takes a few minutes."
+ENGINE_NOTE = "Phase 2: real audio for The Dig. Sample episodes stay pretend; video and transcripts arrive in Phase 3."
+NO_TRANSCRIPT = ("This episode has no transcript yet; transcripts arrive in Phase 3. "
+                 "For now, cut by time: give the start and end.")
 ANGLE_ALIASES = {"everyone", "all", "wide", "grid", "group", "everybody"}
 
 
@@ -79,8 +90,10 @@ def _q(text: str, limit: int = 60) -> str:
 
 
 class Cutzo:
-    def __init__(self, library: Path | str, *, speed: float = 1.0, seed_samples: bool = True, workers: int = 2):
+    def __init__(self, library: Path | str, *, speed: float = 1.0, seed_samples: bool = True, workers: int = 2,
+                 drive: Path | str | None = None):
         self.library = Path(library)
+        self.drive = Path(drive) if drive else None  # Google Drive, where the show kit lives
         self.library.mkdir(parents=True, exist_ok=True)
         for sub in ("episodes", "exports", "kit", "jobs", "logs", "samples", "trash"):
             (self.library / sub).mkdir(exist_ok=True)
@@ -109,7 +122,7 @@ class Cutzo:
             "platform": platform.platform(terse=True),
             "pid": os.getpid(),
             "started": self.started,
-            "note": PHASE1_NOTE,
+            "note": ENGINE_NOTE,
         }
 
     # =============================================================== shows
@@ -314,9 +327,19 @@ class Cutzo:
     def _import_work(self, ep_id: str, files: list[dict[str, Any]]):
         def work(ctx: JobContext) -> dict[str, Any]:
             ctx.step("Checking files", 0.05)
-            ctx.sleep(1.0)
-            ctx.step("Reading recording details", 0.5)
-            ctx.sleep(1.0)
+            probes: dict[str, dict[str, Any]] = {}
+            if self._load(ep_id).get("sample"):
+                ctx.sleep(1.0)
+                ctx.step("Reading recording details", 0.5)
+                ctx.sleep(1.0)
+            else:
+                for k, info in enumerate(files):
+                    ctx.step("Reading recording details", 0.1 + 0.85 * k / max(1, len(files)), info["name"])
+                    try:
+                        probes[info["path"]] = ffmpeg.probe(info["path"])
+                    except CutzoError as exc:
+                        probes[info["path"]] = {"problem": exc.message}
+            problems = []
             with self._lock:
                 ep = self._load(ep_id)
                 known = {m["path"].lower() for m in ep["media"]}
@@ -328,6 +351,14 @@ class Cutzo:
                     entry["id"] = f"m{len(ep['media']) + 1}"
                     entry["original"] = True
                     entry["exists"] = True
+                    found = probes.get(info["path"])
+                    if found is not None:
+                        if found.get("problem"):
+                            entry["problem"] = found["problem"]
+                            problems.append(found["problem"])
+                        else:
+                            entry["probe"] = found
+                            entry["duration"] = found.get("duration")
                     ep["media"].append(entry)
                     known.add(info["path"].lower())
                     added += 1
@@ -336,7 +367,10 @@ class Cutzo:
                 if added and ep["stages"].get("auto_edit") == "done":
                     ep["needs_rebuild"] = True
                 self._save(ep)
-            return {"added": added, "summary": f"Imported {added} recording(s) into \u201c{ep['title']}\u201d."}
+            summary = f"Imported {added} recording(s) into \u201c{ep['title']}\u201d."
+            if problems:
+                summary += f" {len(problems)} couldn't be read: {problems[0]}"
+            return {"added": added, "summary": summary, "problems": problems}
         return work
 
     # =============================================================== build
@@ -348,16 +382,30 @@ class Cutzo:
         show = showlib.find_show(template) if template else showlib.get_show(ep["show"])
         if not show:
             raise NotFound(f"No show template called \u201c{template}\u201d.", hint="Templates: The Dig, The New Heretics.")
+        if not ep.get("sample"):
+            usable = [m for m in ep["media"] if not m.get("problem")]
+            if not usable:
+                raise CutzoError("None of this episode's recordings could be read, so there's nothing to build.",
+                                 hint="Import the recordings again, or check that they open on this computer.")
+            toolbox.require("ffmpeg")
+            if VoiceSettings.from_dict(self._voice_settings(ep, show)).strength:
+                toolbox.require("deep-filter")
         with self._lock:
             self._refuse_if_busy(ep_id, "build")
             job = self.jobs.submit(kind="build", title=f"Build {ep['title']}", episode=ep_id, source=source,
                                    steps=[label for _, label, _ in BUILD_STEPS], work=self._build_work(ep_id, show["id"]))
         self._log(source, "build_episode", f"Started building \u201c{ep['title']}\u201d (template: {show['name']})",
                   ep_id, details={"job": job["id"]})
-        return {"job": job, "steps": [label for _, label, _ in BUILD_STEPS], "note": BUILD_NOTE}
+        return {"job": job, "steps": [label for _, label, _ in BUILD_STEPS],
+                "note": SAMPLE_BUILD_NOTE if ep.get("sample") else REAL_BUILD_NOTE}
 
     def _build_work(self, ep_id: str, show_id: str):
         def work(ctx: JobContext) -> dict[str, Any]:
+            if self._load(ep_id).get("sample"):
+                return pretend(ctx)
+            return self._real_build(ctx, ep_id, show_id)
+
+        def pretend(ctx: JobContext) -> dict[str, Any]:
             total = sum(secs for _, _, secs in BUILD_STEPS)
             elapsed = 0.0
             current = None
@@ -476,12 +524,169 @@ class Cutzo:
             ep.pop("needs_rebuild", None)
             self._save(ep)
 
+    # ---------------------------------------------------------- real build
+    def _voice_settings(self, ep: dict[str, Any], show: dict[str, Any] | None = None) -> dict[str, Any]:
+        show = show or showlib.get_show(ep["show"]) or {}
+        return {**(show.get("voice") or {}), **(ep.get("voice_settings") or {})}
+
+    def _real_build(self, ctx: JobContext, ep_id: str, show_id: str) -> dict[str, Any]:
+        """Phase 2: line up the recordings, clean the voices, find dead air (see build.py)."""
+        ep = self._load(ep_id)
+        show = showlib.get_show(show_id) or {}
+        settings = VoiceSettings.from_dict(self._voice_settings(ep, show))
+        ep_dir = self._ep_dir(ep_id)
+        work = self.guard.writable(ep_dir / "work")
+        share = {"sync": (0.0, 0.12), "voice": (0.12, 0.82), "auto_edit": (0.94, 0.06)}
+
+        def reporter(key: str, label: str):
+            base, size = share[key]
+            return lambda p, detail=None: ctx.step(label, base + size * max(0.0, min(1.0, p)), detail)
+
+        current = None
+        try:
+            current = "sync"
+            self._set_stage(ep_id, "sync", "running")
+            report = reporter("sync", "Sync")
+            report(0.0, STAGE_DETAIL["sync"])
+            chosen, mix, notes = buildlib.choose_sources([m for m in ep["media"] if not m.get("problem")])
+            sources, mix_raw = buildlib.decode_sources(chosen, mix, work, check=ctx.check,
+                                                       report=lambda p, label: report(0.9 * p, label))
+            notes += buildlib.line_up(sources, mix_raw, check=ctx.check)
+            with self._lock:
+                ep = self._load(ep_id)
+                used = {s.media_id: s for s in sources}
+                for m in ep["media"]:
+                    s = used.get(m["id"])
+                    if s:
+                        m["sync"] = {"offset": s.offset, "method": s.method, "confidence": s.confidence, "used": True}
+                    else:
+                        m["sync"] = {"used": False, "method": "Not used for the sound"}
+                ep["build_notes"] = notes
+                self._save(ep)
+            self._set_stage(ep_id, "sync", "done")
+
+            current = "voice"
+            self._set_stage(ep_id, "voice", "running")
+            report = reporter("voice", "Podcast voice")
+            report(0.0, STAGE_DETAIL["voice"])
+            _, _, total = buildlib.build_voice(ep_dir, sources, settings, check=ctx.check, report=report)
+            for cache in ep_dir.glob("waveform*.json"):
+                cache.unlink()
+            with self._lock:
+                ep = self._load(ep_id)
+                ep["duration"] = total
+                ep["voice"] = {"preset": "Podcast voice", "strength": settings.strength, "steps": settings.steps(),
+                               "settings": self._voice_settings(ep, show), "made": now_iso()}
+                self._save(ep)
+            report(0.97, "Measuring how loud the talking is")
+            self._talk_loudness(ep_id, check=ctx.check)
+            self._set_stage(ep_id, "voice", "done")
+            self._set_stage(ep_id, "transcribe", "later")
+
+            current = "auto_edit"
+            self._set_stage(ep_id, "auto_edit", "running")
+            report = reporter("auto_edit", "Auto-edit")
+            report(0.0, "Finding dead air")
+            found = self._apply_real_auto_edit(ep_id)
+            self._set_stage(ep_id, "auto_edit", "done")
+            current = None
+        finally:
+            if current:
+                self._set_stage(ep_id, current, "todo")
+            buildlib.tidy(ep_dir)
+        ep = self._load(ep_id)
+        saved = sum(e["end"] - e["start"] for e in found)
+        return {
+            "summary": f"Built “{ep['title']}”: {fmt_duration(ep['duration'])} cleaned, "
+                       f"{len(found)} long silences to shorten (saves {fmt_duration(saved)}). Ready to review.",
+            "suggested_cuts": len(found),
+            "notes": ep.get("build_notes", []),
+        }
+
+    def _apply_real_auto_edit(self, ep_id: str) -> list[dict[str, Any]]:
+        """Suggest dead-air cuts from the cleaned voice track, keeping your own cuts and anything you brought back."""
+        ep = self._load(ep_id)
+        settings = {**buildlib.DEAD_AIR, **(ep.get("dead_air") or {})}
+        cuts, levels = buildlib.find_dead_air(self._ep_dir(ep_id) / "voice.f32", longer_than=float(settings["longer_than"]),
+                                              keep=float(settings["keep"]), threshold_db=settings.get("threshold_db"))
+        dismissed = [tuple(r) for r in ep.get("dismissed", [])]
+        cuts = [c for c in cuts if not any(c["start"] < b and a < c["end"] for a, b in dismissed)]
+        with self._lock:
+            ep = self._load(ep_id)
+            ep["edits"] = [e for e in ep["edits"] if e.get("by") != "auto"]
+            made = []
+            for c in cuts:
+                edit = self._new_edit(ep, by="auto", **c)
+                ep["edits"].append(edit)
+                made.append(edit)
+            ep["dead_air"] = {"longer_than": settings["longer_than"], "keep": settings["keep"],
+                              "threshold_db": settings.get("threshold_db"), "measured": levels}
+            ep.pop("needs_rebuild", None)
+            self._save(ep)
+        return made
+
+    def set_dead_air(self, episode: str, longer_than: Any = None, keep: Any = None, source: str = "you") -> dict[str, Any]:
+        """How tight the dead-air trimming is: silences longer than `longer_than` seconds become `keep` seconds."""
+        ep_id = self.resolve_episode(episode)
+        ep = self._load(ep_id)
+        if ep.get("sample"):
+            raise CutzoError("Dead-air settings work on real episodes; sample episodes use pretend cuts.")
+        self._require_built(ep)
+        settings = {**buildlib.DEAD_AIR, **(ep.get("dead_air") or {})}
+        try:
+            new_long = float(longer_than) if longer_than not in (None, "") else float(settings["longer_than"])
+            new_keep = float(keep) if keep not in (None, "") else float(settings["keep"])
+        except (TypeError, ValueError):
+            raise CutzoError("Give the times in seconds, like 1.0 and 0.5.") from None
+        if not 0.3 <= new_long <= 10:
+            raise CutzoError("“Longer than” must be between 0.3 and 10 seconds.")
+        if not 0.1 <= new_keep < new_long:
+            raise CutzoError("“Keep” must be at least 0.1 seconds and shorter than “longer than”.")
+        with self._lock:
+            self._refuse_if_busy(ep_id, "auto-edit")
+            ep = self._load(ep_id)
+            ep["dead_air"] = {**(ep.get("dead_air") or {}), "longer_than": new_long, "keep": new_keep}
+            self._save(ep)
+        made = self._apply_real_auto_edit(ep_id)
+        ep = self._load(ep_id)
+        saved = sum(e["end"] - e["start"] for e in made)
+        summary = (f"Dead air: silences longer than {new_long:g} s now shrink to {new_keep:g} s "
+                   f"({len(made)} places, saves {fmt_duration(saved)})")
+        self._log(source, "set_dead_air", f"{summary} in {_q(ep['title'], 40)}", ep_id)
+        return {"summary": summary, "suggested_cuts": len(made), "final_length": fmt_duration(self._final_duration(ep) or 0)}
+
+    def set_voice(self, episode: str, strength: Any = None, source: str = "you") -> dict[str, Any]:
+        """Change how strongly this episode's voices are cleaned (0-100), then rebuild to hear it."""
+        ep_id = self.resolve_episode(episode)
+        ep = self._load(ep_id)
+        if ep.get("sample"):
+            raise CutzoError("Cleanup settings work on real episodes; sample episodes are pretend.")
+        try:
+            value = int(round(float(strength)))
+        except (TypeError, ValueError):
+            raise CutzoError("Give the strength as a number from 0 (off) to 100 (strongest).") from None
+        if not 0 <= value <= 100:
+            raise CutzoError("The strength goes from 0 (off) to 100 (strongest).")
+        with self._lock:
+            self._refuse_if_busy(ep_id, "settings")
+            ep = self._load(ep_id)
+            ep["voice_settings"] = {**(ep.get("voice_settings") or {}), "strength": value}
+            if ep["stages"].get("voice") == "done":
+                ep["needs_rebuild"] = True
+            self._save(ep)
+        summary = f"Voice cleanup strength set to {value} of 100" + (" (rebuild to hear it)" if ep.get("needs_rebuild") else "")
+        self._log(source, "set_voice", f"{summary} in {_q(ep['title'], 40)}", ep_id)
+        return {"summary": summary, "needs_rebuild": bool(ep.get("needs_rebuild"))}
+
     # ========================================================== transcript
     def get_transcript(self, episode: str, include_cut: bool = False, fmt: str = "text",
                        source: str = "you") -> dict[str, Any]:
         ep = self._load(self.resolve_episode(episode))
         tr = self._transcript(ep["id"])
         if not tr.get("words"):
+            if not ep.get("sample"):
+                raise CutzoError("This episode has no transcript yet; transcripts arrive in Phase 3.",
+                                 hint="For now, find moments by time (the waveform in Cutzo shows where people talk).")
             raise CutzoError("This episode hasn't been transcribed yet.",
                              hint="Build the episode first; transcription is one of its steps.")
         self._log_read(source, "get_transcript", f"read the transcript of {_q(ep['title'], 40)}", ep["id"])
@@ -504,12 +709,33 @@ class Cutzo:
             out["text"] = tx.as_text(tr, cuts, include_cut=include_cut)
         return out
 
-    def waveform(self, episode: str, buckets: int = 1200) -> dict[str, Any]:
+    def waveform(self, episode: str, buckets: int = 1200, start: float | None = None,
+                 end: float | None = None) -> dict[str, Any]:
+        """Loudness outline for drawing. Real episodes can ask for a stretch (start..end, seconds) to zoom in."""
         ep_id = self.resolve_episode(episode)
-        wav = self._ep_dir(ep_id) / "preview.wav"
+        ep_dir = self._ep_dir(ep_id)
+        voice = ep_dir / "voice.f32"
+        if voice.exists():
+            pcm = audio.Pcm(voice)
+            a = max(0.0, float(start or 0.0))
+            b = min(pcm.duration, float(end)) if end not in (None, "") else pcm.duration
+            if b <= a:
+                raise CutzoError("The end of the stretch must be after its start.")
+            whole = a == 0.0 and b == pcm.duration
+            cache = ep_dir / f"waveform-{int(buckets)}.json"
+            mtime = voice.stat().st_mtime
+            if whole:
+                data = read_json(cache)
+                if isinstance(data, dict) and data.get("mtime") == mtime:
+                    return data
+            data = {"buckets": int(buckets), "mtime": mtime, **audio.peaks(pcm, int(buckets), a, b)}
+            if whole:
+                write_json(self.guard.writable(cache), data)
+            return data
+        wav = ep_dir / "preview.wav"
         if not wav.exists():
             raise NotFound("No audio to draw yet. Build the episode first.")
-        cache = self._ep_dir(ep_id) / "waveform.json"
+        cache = ep_dir / "waveform.json"
         mtime = wav.stat().st_mtime
         data = read_json(cache)
         if isinstance(data, dict) and data.get("buckets") == buckets and data.get("mtime") == mtime:
@@ -518,12 +744,19 @@ class Cutzo:
         write_json(self.guard.writable(cache), data)
         return data
 
-    def preview_audio(self, episode: str) -> Path:
+    def preview_audio(self, episode: str, which: str = "cleaned") -> Path:
+        """The file the player plays: the cleaned voices, or (real episodes) the original sound to compare."""
         ep_id = self.resolve_episode(episode)
-        wav = self._ep_dir(ep_id) / "preview.wav"
-        if not wav.exists():
-            raise NotFound("No preview audio yet. Build the episode first.")
-        return wav
+        ep_dir = self._ep_dir(ep_id)
+        if which == "original":
+            path = ep_dir / "original.m4a"
+            if not path.exists():
+                raise NotFound("No original-sound copy for this episode.", hint="Build it again to make one.")
+            return path
+        for name in ("preview.m4a", "preview.wav"):
+            if (ep_dir / name).exists():
+                return ep_dir / name
+        raise NotFound("No preview audio yet. Build the episode first.")
 
     # ============================================================== edits
     def cut_section(self, episode: str, start: Any, end: Any, source: str = "you", reason: str = "manual",
@@ -558,6 +791,8 @@ class Cutzo:
             ep = self._load(self.resolve_episode(episode))
             self._require_built(ep)
             words = self._transcript(ep["id"]).get("words", [])
+            if not words and not ep.get("sample"):
+                raise CutzoError(NO_TRANSCRIPT)
             if not str(text or "").strip():
                 raise CutzoError("Which words? Give the exact words to cut.")
             hits = tx.find_phrase(words, text)
@@ -613,6 +848,9 @@ class Cutzo:
                 raise NotFound(f"No edit called {edit_id!r} in this episode.",
                                hint="Edit ids are listed by get_episode (e1, e2, ...).")
             ep["edits"] = [e for e in ep["edits"] if e["id"] != edit_id]
+            if edit["type"] == "cut" and edit.get("by") == "auto" and not ep.get("sample"):
+                # Remember it, so finding dead air again doesn't suggest it a second time.
+                ep.setdefault("dismissed", []).append([edit["start"], edit["end"]])
             if edit["type"] == "cut":
                 summary = f"Brought back {fmt_time(edit['start'], precise=True)}\u2013{fmt_time(edit['end'], precise=True)}" + (
                     f" (\u201c{_q(edit['text'])}\u201d)" if edit.get("text") else "")
@@ -689,6 +927,68 @@ class Cutzo:
         self._log(source, "remove_chapter", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
         return {"summary": summary}
 
+    # ------------------------------------------------------- highlight picks
+    PICK_KINDS = {"cold_open": "cold open", "outro": "sign-off"}
+    PICK_LIMITS = {"cold_open": 45.0, "outro": 60.0}
+
+    def _pick_kind(self, kind: str) -> str:
+        k = str(kind or "").strip().lower().replace("-", " ").replace("_", " ")
+        if k in ("cold open", "coldopen", "teaser", "highlight", "highlights", "intro", "opening", "open"):
+            return "cold_open"
+        if k in ("outro", "sign off", "signoff", "ending", "end", "closing", "outro clip", "outro clips"):
+            return "outro"
+        raise CutzoError(f"“{kind}” isn't a kind of pick. Use “cold open” (highlights at the start) "
+                         "or “sign-off” (clips at the end).")
+
+    def add_pick(self, episode: str, kind: str, start: Any, end: Any, source: str = "you") -> dict[str, Any]:
+        """Add a stretch of the recording to the cold open (highlights at the start) or the sign-off (at the end)."""
+        key = self._pick_kind(kind)
+        with self._lock:
+            ep = self._load(self.resolve_episode(episode))
+            self._require_built(ep)
+            a = parse_time(start, name="start")
+            b = min(parse_time(end, name="end"), float(ep["duration"]))
+            if b <= a:
+                raise CutzoError("The end must be after the start.")
+            if b - a < 0.5:
+                raise CutzoError("That's too short to use (under half a second).")
+            picks = ep.setdefault("picks", {}).setdefault(key, [])
+            total = sum(p["end"] - p["start"] for p in picks) + (b - a)
+            limit = self.PICK_LIMITS[key]
+            if total > limit:
+                raise CutzoError(f"The {self.PICK_KINDS[key]} would run {fmt_duration(total)}; keep it under "
+                                 f"{fmt_duration(limit)}.", hint="Pick a shorter stretch, or remove one first.")
+            pick = {"id": self._next_id(ep, "p"), "start": round(a, 3), "end": round(b, 3), "by": source, "at": now_iso()}
+            picks.append(pick)
+            summary = (f"Added {fmt_time(a, precise=True)}–{fmt_time(b, precise=True)} ({b - a:.1f} s) "
+                       f"to the {self.PICK_KINDS[key]}")
+            self._push_history(ep, {"op": "add_pick", "kind": key, "id": pick["id"], "summary": summary})
+            self._save(ep)
+        self._log(source, "add_pick", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
+        return {"pick": self._pick_view(pick, key), "summary": summary,
+                "total": fmt_duration(total)}
+
+    def remove_pick(self, episode: str, pick_id: str, source: str = "you") -> dict[str, Any]:
+        with self._lock:
+            ep = self._load(self.resolve_episode(episode))
+            for key, picks in (ep.get("picks") or {}).items():
+                pick = next((p for p in picks if p["id"] == pick_id), None)
+                if pick:
+                    picks.remove(pick)
+                    break
+            else:
+                raise NotFound(f"No cold-open or sign-off pick called {pick_id!r} in this episode.")
+            summary = (f"Removed {fmt_time(pick['start'], precise=True)}–{fmt_time(pick['end'], precise=True)} "
+                       f"from the {self.PICK_KINDS[key]}")
+            self._push_history(ep, {"op": "remove_pick", "kind": key, "pick": pick, "summary": summary})
+            self._save(ep)
+        self._log(source, "remove_pick", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
+        return {"summary": summary}
+
+    def _pick_view(self, pick: dict[str, Any], key: str) -> dict[str, Any]:
+        return {**pick, "kind": key, "kind_label": self.PICK_KINDS[key], "start_text": fmt_time(pick["start"], precise=True),
+                "end_text": fmt_time(pick["end"], precise=True), "length": round(pick["end"] - pick["start"], 3)}
+
     def swap_asset(self, episode: str, slot: str, asset: str, source: str = "you") -> dict[str, Any]:
         with self._lock:
             ep = self._load(self.resolve_episode(episode))
@@ -733,6 +1033,9 @@ class Cutzo:
             return len(ep["edits"]) < before
         if op == "remove_edit":
             ep["edits"].append(item["edit"])
+            span = [item["edit"]["start"], item["edit"]["end"]]
+            if span in ep.get("dismissed", []):
+                ep["dismissed"].remove(span)
             return True
         if op == "add_chapter":
             before = len(ep["chapters"])
@@ -748,6 +1051,15 @@ class Cutzo:
         if op == "remove_chapter":
             ep["chapters"].append(item["chapter"])
             ep["chapters"].sort(key=lambda c: c["time"])
+            return True
+        if op == "add_pick":
+            picks = (ep.get("picks") or {}).get(item["kind"], [])
+            before = len(picks)
+            picks[:] = [p for p in picks if p["id"] != item["id"]]
+            return len(picks) < before
+        if op == "remove_pick":
+            ep.setdefault("picks", {}).setdefault(item["kind"], []).append(item["pick"])
+            ep["picks"][item["kind"]].sort(key=lambda p: int(re.sub(r"\D", "", p["id"]) or 0))
             return True
         if op == "asset":
             overrides = ep.setdefault("assets", {})
@@ -776,6 +1088,15 @@ class Cutzo:
                 raise CutzoError(f"Unknown export target \u201c{t}\u201d. Choose from: {names}.")
             if p["id"] not in [c["id"] for c in chosen]:
                 chosen.append(p)
+        if not ep.get("sample"):
+            video = [p["label"] for p in chosen if p["kind"] == "video"]
+            if video:
+                raise CutzoError(f"{', '.join(video)}: video exports arrive in Phase 3. Audio exports work now.",
+                                 hint="Export podcast-mp3 (or podcast-aac) for this episode.")
+            if not (self._ep_dir(ep_id) / "voice.f32").exists():
+                raise CutzoError("This episode's cleaned audio is missing, so it can't be exported.",
+                                 hint="Build the episode again first.")
+            toolbox.require("ffmpeg")
         plan = [{"target": p["id"], "label": p["label"], "kind": p["kind"], "file": self._export_path(ep, show, p)}
                 for p in chosen]
         mine = {x["file"].lower() for x in ep.get("exports", [])}
@@ -787,14 +1108,119 @@ class Cutzo:
                 f"{labels} {'is' if len(existing) + len(on_disk) == 1 else 'are'} already exported for this episode.",
                 hint="Repeat with confirm=true to replace the finished file(s); check with Nick first.",
                 data={"existing": [x["file"] for x in existing] + [x["file"] for x in on_disk]})
+        work = self._export_work(ep_id, plan) if ep.get("sample") else self._real_export_work(ep_id, plan)
         with self._lock:
             self._refuse_if_busy(ep_id, "export")
             job = self.jobs.submit(kind="export", title=f"Export {ep['title']}", episode=ep_id, source=source,
-                                   steps=[f"Render {p['label']}" for p in chosen], work=self._export_work(ep_id, plan))
+                                   steps=[f"Render {p['label']}" for p in chosen], work=work)
         labels = ", ".join(p["label"] for p in chosen)
         self._log(source, "export", f"Started exporting {labels} for {_q(ep['title'], 40)}", ep_id,
                   details={"job": job["id"]})
-        return {"job": job, "targets": plan, "note": EXPORT_NOTE}
+        note = SAMPLE_EXPORT_NOTE if ep.get("sample") else f"Writes the finished file(s) to {self.library / 'exports'}."
+        return {"job": job, "targets": plan, "note": note}
+
+    def _real_export_work(self, ep_id: str, plan: list[dict[str, Any]]):
+        def work(ctx: JobContext) -> dict[str, Any]:
+            ep = self._load(ep_id)
+            show = showlib.get_show(ep["show"]) or {}
+            ep_dir = self._ep_dir(ep_id)
+            voice_path = ep_dir / "voice.f32"
+            ctx.step("Laying out the episode", 0.01, "Intro, breaks and ending from the show kit")
+            talk = self._talk_loudness(ep_id, check=ctx.check)
+            kit_dir = self.guard.writable(self.library / "kit")
+
+            def kit_file(asset_id: str) -> Path:
+                return kit.local_copy(asset_id, kit_dir=kit_dir, drive=self.drive, check=ctx.check)
+
+            def length_of(asset_id: str) -> float:
+                return audio.Pcm(kit_file(asset_id), channels=2).duration
+
+            layout = recipes.plan_episode(ep, show, voice_path=voice_path, talk_lufs=talk, kit_file=kit_file,
+                                          length_of=length_of)
+            mix_path = self.guard.writable(ep_dir / "mix.f32")
+            entries = []
+            try:
+                render.mix(layout, mix_path, check=ctx.check, progress=lambda p: ctx.step("Mixing", 0.05 + 0.25 * p))
+                n = len(plan)
+                for k, item in enumerate(plan):
+                    preset = presets.get_preset(item["target"]) or {}
+                    spec = preset["spec"]
+                    dst = self.guard.writable(item["file"])
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    base, size = 0.3 + 0.7 * k / n, 0.7 / n
+                    tags = {"title": ep["title"], "artist": show.get("network") or show.get("name", ""),
+                            "album": show.get("name", ""), "genre": "Podcast", "date": ep["created"][:4],
+                            "encoded_by": f"Cutzo {__version__}"}
+                    made = render.encode(mix_path, dst, spec, tags=tags, chapters=layout.chapters, total=layout.total,
+                                         check=ctx.check,
+                                         progress=lambda p, label, base=base, size=size: ctx.step(label, base + 0.6 * size * p))
+                    ctx.step(f"Checking {item['label']}", base + 0.65 * size, "ffprobe and a loudness scan")
+                    checked = render.check_file(dst, spec, check=ctx.check)
+                    off = spec["loudness"] - checked["loudness"]["integrated"]
+                    if abs(off) > 0.3:
+                        # The peak limiter took a little loudness away: nudge the gain and encode once more.
+                        made = render.encode(mix_path, dst, spec, tags=tags, chapters=layout.chapters, total=layout.total,
+                                             check=ctx.check, measured=made["before"], trim_db=off,
+                                             progress=lambda p, label, base=base, size=size:
+                                             ctx.step("Fine-tuning the loudness", base + (0.7 + 0.2 * p) * size))
+                        checked = render.check_file(dst, spec, check=ctx.check)
+                    with self._lock:
+                        ep = self._load(ep_id)
+                        entry = {
+                            "id": f"x{len(ep.get('exports', [])) + 1}",
+                            "target": item["target"],
+                            "label": item["label"],
+                            "file": str(dst),
+                            "status": "done",
+                            "at": now_iso(),
+                            "sample": False,
+                            "written": True,
+                            "final_length": fmt_duration(layout.total),
+                            "seconds": round(layout.total, 3),
+                            "bytes": checked["bytes"],
+                            "layout": recipes.describe(layout),
+                            "loudness_change_db": made["gain_db"],
+                            "check": {"passed": checked["passed"], "sample": False, "checked_at": now_iso(),
+                                      "rules": checked["rules"]},
+                        }
+                        ep["exports"] = [x for x in ep.get("exports", []) if x["target"] != item["target"]] + [entry]
+                        ep["stages"]["export"] = "done"
+                        self._save(ep)
+                    entries.append(entry)
+            finally:
+                mix_path.unlink(missing_ok=True)
+            failed = [e for e in entries if not e["check"]["passed"]]
+            labels = ", ".join(e["label"] for e in entries)
+            summary = f"Exported {labels} ({entries[0]['final_length']})." if entries else "Nothing exported."
+            summary += " Some checks failed; see the Export tab." if failed else " All checks passed."
+            return {"summary": summary, "exports": entries}
+        return work
+
+    def _talk_loudness(self, ep_id: str, check=None) -> float:
+        """How loud the cleaned conversation is (LUFS), measured once per build."""
+        ep = self._load(ep_id)
+        voice = self._ep_dir(ep_id) / "voice.f32"
+        cached = (ep.get("voice") or {}).get("talk_lufs")
+        if cached is not None and (ep.get("voice") or {}).get("talk_mtime") == int(voice.stat().st_mtime):
+            return float(cached)
+        measured = ffmpeg.loudness(voice, check=check)["integrated"]
+        with self._lock:
+            ep = self._load(ep_id)
+            ep.setdefault("voice", {})["talk_lufs"] = measured
+            ep["voice"]["talk_mtime"] = int(voice.stat().st_mtime)
+            self._save(ep)
+        return measured
+
+    def reveal(self, file: str) -> dict[str, Any]:
+        """Show a finished export in File Explorer (only files inside Cutzo's library)."""
+        path = Path(str(file).strip().strip('"'))
+        if not self.guard.is_writable(path) or not path.exists():
+            raise NotFound("Can't show that file; it isn't one of Cutzo's exports.")
+        if os.name == "nt":
+            import subprocess
+            subprocess.Popen(["explorer.exe", "/select,", str(path)])
+            return {"shown": str(path)}
+        return {"shown": None, "note": "Showing files works on Windows."}
 
     def _export_work(self, ep_id: str, plan: list[dict[str, Any]]):
         def work(ctx: JobContext) -> dict[str, Any]:
@@ -967,8 +1393,16 @@ class Cutzo:
         samples_ok = any(ep.get("sample") for ep in self._all_projects())
         add("Sample episodes", samples_ok, "Present." if samples_ok else "Missing. Use Reset sample data in Settings.")
         add("Engine", True, f"Cutzo {__version__} (Phase {PHASE}) on Python {info['python']}.")
-        ffmpeg = shutil.which("ffmpeg")
-        add("FFmpeg", None, f"Found at {ffmpeg}." if ffmpeg else "Not installed yet; it isn't needed until Phase 2.")
+        for t in toolbox.status():
+            if t["ok"]:
+                where = "Cutzo's own copy" if t["own_copy"] else "the copy on this computer's PATH"
+                detail = f"Ready ({where}, {t['version'] if t['own_copy'] else 'version not checked'})."
+                if t["tool"] == "ffmpeg":
+                    found = ffmpeg.version()
+                    detail = f"Ready: version {found or 'unknown'} ({where})."
+                add(t["label"], True, detail)
+            else:
+                add(t["label"], False, "Not installed. Double-click “Update Cutzo” in the Cutzo folder to install it.")
         last = self.activity.last_from("claude")
         add("Claude connector", True if last else None,
             f"Last used {last['at']}." if last else "Not used yet. In the Claude app, ask: \u201cList my Cutzo episodes.\u201d")
@@ -1218,7 +1652,7 @@ class Cutzo:
         out, current = [], None
         for key, label in STAGES:
             status = st.get(key, "todo")
-            if current is None and status != "done":
+            if current is None and status not in ("done", "later"):
                 current = key
             out.append({"key": key, "label": label, "status": status})
         return out, current or "done"
@@ -1296,9 +1730,16 @@ class Cutzo:
             "outputs": show.get("outputs", []),
             "exports": ep.get("exports", []),
             "has_transcript": bool(self._transcript(ep["id"]).get("words")),
+            "has_original": (self._ep_dir(ep["id"]) / "original.m4a").exists(),
+            "audio_type": "audio/mp4" if (self._ep_dir(ep["id"]) / "preview.m4a").exists() else "audio/wav",
+            "voice_settings": None if ep.get("sample") else VoiceSettings.from_dict(self._voice_settings(ep, show)).__dict__,
+            "dead_air": None if ep.get("sample") else {**buildlib.DEAD_AIR, **(ep.get("dead_air") or {})},
+            "build_notes": ep.get("build_notes", []),
+            "picks": {key: [self._pick_view(p, key) for p in (ep.get("picks") or {}).get(key, [])]
+                      for key in self.PICK_KINDS},
             "can_undo": bool(ep.get("history")),
             "last_change": (ep.get("history") or [{}])[-1].get("summary"),
             "jobs": self.jobs.list(limit=5, episode=ep["id"]),
-            "note": PHASE1_NOTE if ep.get("sample") else BUILD_NOTE,
+            "note": PHASE1_NOTE if ep.get("sample") else REAL_NOTE,
         })
         return view
