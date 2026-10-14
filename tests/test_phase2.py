@@ -246,6 +246,23 @@ def test_mix_places_pieces_with_gain_and_fades(tmp_path):
     assert y[int(2.75 * RATE), 1] == pytest.approx(0.5, abs=1e-3)
 
 
+@needs_ffmpeg
+def test_encode_keeps_peaks_under_the_limiter_ceiling(tmp_path):
+    from cutzo.core import presets
+
+    spec = presets.get_preset("podcast-mp3")["spec"]
+    rng = np.random.default_rng(5)
+    noise = rng.normal(0, 0.25, (RATE * 8, 2)).astype(np.float32)  # loud, bright, peaky: the hard case
+    mix = audio.write_f32(tmp_path / "mix.f32", noise)
+    dst = tmp_path / "out.mp3"
+    made = render.encode(mix, dst, spec, tags={"title": "t"}, chapters=[], total=8.0)
+    assert made["ceiling_db"] == spec["true_peak_max"] - render.PEAK_MARGIN
+    lower = render.encode(mix, dst, spec, tags={"title": "t"}, chapters=[], total=8.0, measured=made["before"],
+                          ceiling_db=-6.0)
+    assert lower["ceiling_db"] == -6.0
+    assert render.check_file(dst, spec)["loudness"]["true_peak"] < -3.0
+
+
 # ------------------------------------------------------------- kit copies
 @needs_ffmpeg
 def test_kit_local_copy_refreshes_when_drive_changes(tmp_path):

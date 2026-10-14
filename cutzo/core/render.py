@@ -20,6 +20,7 @@ from ..tools import ffmpeg
 from . import audio, timeline
 
 XFADE = 0.012  # seconds of crossfade at every cut in the conversation
+PEAK_MARGIN = 2.0  # dB between the limiter and the true-peak limit (room for encoding overshoot)
 
 
 @dataclass
@@ -166,9 +167,11 @@ def kept_ranges(duration: float, edits: list[dict[str, Any]]) -> list[tuple[floa
 
 def encode(mix_path: Path, dst: Path, spec: dict[str, Any], *, tags: dict[str, str], chapters: list[dict[str, Any]],
            total: float, check: Callable[[], None] | None = None, measured: dict[str, float] | None = None,
-           trim_db: float = 0.0, progress: Callable[[float, str], None] | None = None) -> dict[str, Any]:
+           trim_db: float = 0.0, ceiling_db: float | None = None,
+           progress: Callable[[float, str], None] | None = None) -> dict[str, Any]:
     """Set the loudness (measure, one steady gain, peak limiter) and encode the stereo mix into the
-    finished file. `trim_db` nudges the gain when a first try came out a little off target."""
+    finished file. `trim_db` nudges the gain when a first try came out a little off target;
+    `ceiling_db` (dBFS) lowers the limiter when encoding pushed the peaks over the limit."""
     def report(share: float, label: str) -> None:
         if progress:
             progress(share, label)
@@ -181,10 +184,12 @@ def encode(mix_path: Path, dst: Path, spec: dict[str, Any], *, tags: dict[str, s
     meta.write_text(ffmpeg.ffmetadata(tags, chapters, total), encoding="utf-8")
     tmp = dst.with_name(dst.stem + ".part" + dst.suffix)
     # One steady gain to reach the loudness target (no pumping), then a peak limiter that only
-    # touches the loudest moments, so peaks stay under the limit after encoding too.
+    # touches the loudest moments. MP3 and AAC encoding push peaks up again (by 1 to 2 dB on music
+    # in tests), so the limiter sits PEAK_MARGIN under the limit; the check catches the rest.
     gain = spec["loudness"] - measured["integrated"] + trim_db
-    ceiling = 10 ** ((spec["true_peak_max"] - 1.0) / 20.0)
-    filters = f"volume={gain:.2f}dB,alimiter=limit={ceiling:.4f}:attack=5:release=60:level=false"
+    if ceiling_db is None:
+        ceiling_db = spec["true_peak_max"] - PEAK_MARGIN
+    filters = f"volume={gain:.2f}dB,alimiter=limit={10 ** (ceiling_db / 20.0):.4f}:attack=5:release=60:level=false"
     args = [*ffmpeg.raw_input_args(mix_path, 2), "-i", str(meta), "-map", "0:a", "-map_metadata", "1",
             "-map_chapters", "1", "-af", filters, "-ac", str(spec["channels"]), "-ar", str(spec["rate"])]
     if spec["codec"] == "mp3":
@@ -198,7 +203,7 @@ def encode(mix_path: Path, dst: Path, spec: dict[str, Any], *, tags: dict[str, s
     finally:
         tmp.unlink(missing_ok=True)
         meta.unlink(missing_ok=True)
-    return {"before": measured, "gain_db": round(gain, 2)}
+    return {"before": measured, "gain_db": round(gain, 2), "ceiling_db": round(ceiling_db, 2)}
 
 
 def check_file(path: Path, spec: dict[str, Any], *, check: Callable[[], None] | None = None) -> dict[str, Any]:

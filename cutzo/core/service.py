@@ -1162,12 +1162,16 @@ class Cutzo:
                     ctx.step(f"Checking {item['label']}", base + 0.65 * size, "ffprobe and a loudness scan")
                     checked = render.check_file(dst, spec, check=ctx.check)
                     off = spec["loudness"] - checked["loudness"]["integrated"]
-                    if abs(off) > 0.3:
-                        # The peak limiter took a little loudness away: nudge the gain and encode once more.
+                    over = checked["loudness"]["true_peak"] - spec["true_peak_max"]
+                    if abs(off) > 0.3 or over > 0:
+                        # The limiter took a little loudness away, or encoding pushed a peak over the
+                        # limit: nudge the gain, lower the limiter if needed, and encode once more.
+                        ceiling = made["ceiling_db"] - (over + 0.5 if over > 0 else 0.0)
                         made = render.encode(mix_path, dst, spec, tags=tags, chapters=layout.chapters, total=layout.total,
-                                             check=ctx.check, measured=made["before"], trim_db=off,
+                                             check=ctx.check, measured=made["before"], trim_db=off, ceiling_db=ceiling,
                                              progress=lambda p, label, base=base, size=size:
                                              ctx.step("Fine-tuning the loudness", base + (0.7 + 0.2 * p) * size))
+                        ctx.step(f"Checking {item['label']} again", base + 0.92 * size, "ffprobe and a loudness scan")
                         checked = render.check_file(dst, spec, check=ctx.check)
                     with self._lock:
                         ep = self._load(ep_id)
