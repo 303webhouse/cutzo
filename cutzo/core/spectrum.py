@@ -7,10 +7,12 @@ as a soft line across a straight path, on both sides of it, as long as that band
 
 How long the lines are for a given sound, the colours and the timing were then matched against the
 finished JW Ghost Stories video (4 stretches of talk, 124 frames, every pixel column):
-- a band's line reaches `height` x amplitude^0.7 pixels from the path at 1080p (amplitude 1.0 = a
-  full-scale sine at that frequency); the shapes agree with 0.83 correlation;
+- a band's line reaches 480 x amplitude^0.7 pixels from the path at 1080p (amplitude 1.0 = a
+  full-scale sine at that frequency), measured over a 90 ms Hann window; the lengths agree with
+  the real ones with 0.75 correlation, column by column (other windows and scales did worse);
 - the sound shown is centred 97.5 ms after the frame;
-- each column of pixels shows its tallest band, so the tops step like a bar chart;
+- each column of pixels shows its tallest band, so the tops step like a bar chart (the real tops
+  are a little more jagged still);
 - the shape is a see-through fill (about 75% solid) in orange at both ends of the path (hue 30)
   and yellow in the middle (hue 58), with a brighter, yellower rim along its edges and a bright
   line along the path.
@@ -48,7 +50,7 @@ class Style:
     window: float = 0.090  # seconds of sound behind each frame ("Audio Duration", 90 ms)
     window_shape: str = "hann"  # "hann" or "rect"
     lead: float = 0.0975  # the sound shown is centred this long after the frame
-    height: float = 560.0  # a band's line reaches height x amplitude^power pixels from the path
+    height: float = 480.0  # a band's line reaches height x amplitude^power pixels from the path
     power: float = 0.7
     thickness: float = 3.85  # line thickness (7.7 in the half-size render)
     softness: float = 0.5
