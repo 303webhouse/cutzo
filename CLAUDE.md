@@ -73,8 +73,27 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
     (otherwise an "um" that runs into the next word gets missed).
   - `build.transcribe` makes the 16 kHz copy, runs Parakeet and works out who said what from
     the separate tracks. `transcript.json` sits in the episode folder.
+  - The New Heretics' video (step 3, Oct 15): `recipes.NEW_HERETICS` copies Nick's Spooky Sode
+    edit (teaser ends as the montage's own music starts; talk 83.7 s into the montage; music
+    breaks before chapters with `segment: true`; a page flip, or a voiced segment title, at every
+    other chapter; ending music + Full Flames under the sign-off picks; fade to black). It fills
+    `render.Plan.picture` (layers bottom to top, spectrum windows) besides the sound.
+    `core/video.py` composes it in one FFmpeg pass over a black canvas, layers placed with
+    `setpts` and `overlay=eof_action=pass` (long fading layers split so only fades blend), the
+    spectrum fed through stdin (`ffmpeg.run(feed=...)`), the sound encoded and checked first
+    (`_encode_checked`) and copied in. NVENC if the driver allows (Nick's 572 is too old for
+    FFmpeg 9's NVENC: needs 610+), else libx264 `faster`.
+  - `core/spectrum.py` After Effects' Audio Spectrum (settings from Nick's .aep), fitted to the
+    finished JW Ghost Stories frames: per frame a fill and a rim alpha (stacked grey picture),
+    colours as two still PNGs. `core/titles.py` the episode title graphic (Montserrat ExtraBold +
+    SemiBold, bundled in `cutzo/assets/fonts` with the OFL licence), lines from
+    `ep["video_title"]` or the episode title split at its colon.
+  - `kit.video_copy` makes 1080p 29.97 fps x264 copies of kit videos once (`<library>/kit/video`),
+    covering only what episodes use (the Music Loop is 64 min; only the start is needed).
+    Kit entries carry `seconds` so layouts work without the files.
 - Episode folders hold `voice.f32` (cleaned talk, recording time), `original.f32`, the two
-  previews, `transcript.json` and `waveform-*.json` caches. Exports render `mix.f32` then delete it.
+  previews, `transcript.json` and `waveform-*.json` caches. Exports render `mix.f32` then delete it
+  (video exports also use `work-export/`, deleted after).
 
 ## Rules to keep
 
@@ -107,8 +126,8 @@ Episodes marked `sample` still use the Phase 1 pretend steps (`_apply_sync`, `_a
 `_apply_transcribe`, `_apply_auto_edit`, `_export_work`, `_mock_check`). Real episodes go
 through `_real_build` and `_real_export_work`. The transcribe stage is `"later"` when speech to
 text isn't installed (stages treat "later" like done; `transcribe` makes it later). Video
-export is refused for real episodes until the video steps of Phase 3. New outside programs get
-their own wrapper in `cutzo/tools/`.
+export works for The New Heretics at 1080p (`youtube-1080p`, `substack-video`); `youtube-4k` and
+video for The Dig are refused. New outside programs get their own wrapper in `cutzo/tools/`.
 
 ## Running things
 
@@ -152,6 +171,11 @@ Environment variables: `CUTZO_HOME` (library folder), `CUTZO_PORT`, `CUTZO_SPEED
   matplotlib), `listen\index.html` (the listening test page), `whisper\` and `align\` (the
   speech-to-text and word-timing trials of Oct 15, with `align_compare.py`, `cut_variants.py`
   and `filler_plot.py` to measure and draw them).
+  The video step's lab work (Oct 15): `aep_dump.py`/`aep_spect.py` read After Effects projects,
+  `spec_calib*.py` and `look_compare2.py` fit and compare the spectrum against JW Ghost Stories
+  frames, `title_fit.py`/`stem_width.py` measured the title graphic, `tnh_levels.py` and
+  `tnh_gain_curve.py` the music levels, `intro_compare.py`/`find_in.py` line sounds up.
+  `spooky_start.py`/`spooky_edit.py` make the real Spooky Sode episode with Nick's own cuts.
   `lab\bg.ps1 -Script x.py` runs a lab script in the background with Cutzo's Python and
   writes `x.log`/`x.err`, because Desktop Commander gives up on commands after 60 seconds.
   `lab\switch_branch.ps1 -Branch b` puts the app on a branch, runs setup and restarts the engine
