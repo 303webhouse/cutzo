@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import render
+from . import shows as showlib
 from .errors import CutzoError
 
 TALK_REFERENCE_LUFS = -19.2
@@ -102,6 +103,7 @@ NEW_HERETICS: dict[str, Any] = {
         "tnh-cue-239-short1": (None, 4.6),
         "tnh-cue-93696": (-0.5, 25.7),
         "tnh-cue-239-full": (-17.5, 60.527),
+        "tnh-page-flip": (-0.3, None),
     },
     "break_cues": ["tnh-cue-239-short3", "tnh-cue-239-short2", "tnh-cue-239-short1"],
     "break_level_lu": -1.3,  # a break cue on its own sits this far below the talk...
@@ -114,7 +116,7 @@ NEW_HERETICS: dict[str, Any] = {
                "visuals_until": 15.6, "flames_at": 15.115, "flames_start": 5.339, "flames_fade_in": 0.5,
                "signoff_at": 18.452, "signoff_gain_db": 0.5, "fade_to_black": 31.966, "after_signoff": 3.0,
                "no_signoff": 40.0, "no_signoff_fade": 8.0, "title_early": 0.2},
-    "flip_gain_db": -0.3,
+    "flip_level_lu": -12.6,  # another transition sound: this far below the talk (the page flip's level)
     "loop_fade": 1.0,  # a background loop that runs out starts again with this long a dissolve
 }
 
@@ -290,10 +292,21 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
         lufs = loudness_of(asset) if loudness_of else None
         return fallback if lufs is None else ref + relative_lu - lufs
 
-    def flip_piece(at: float) -> None:
-        plan.pieces.append(render.Piece(src=kit_file(flip), channels=2, start=0.0, end=flip_len, at=at,
-                                        gain_db=level(flip, -12.6, recipe["flip_gain_db"]) + kit_offset,
-                                        fade_in=0.01, fade_out=0.05, kind="effect", label="Page flip"))
+    def transition(c: dict[str, Any]) -> tuple[str, float, float, str] | None:
+        """The sound at a chapter: its voiced title if it has one (The New Heretics' old segment names),
+        otherwise the transition sound (the page flip). Returns (asset, length, gain, label)."""
+        voiced = showlib.segment_title_for(show, c["title"])
+        if voiced:
+            return voiced["id"], length_of(voiced["id"]), level(voiced["id"], 0.0, 0.0), "Voiced title"
+        if flip != "none":
+            return flip, flip_len, level(flip, recipe["flip_level_lu"], -0.3), "Page flip"
+        return None
+
+    def play(sound: tuple[str, float, float, str], at: float) -> None:
+        asset, length, gain, label = sound
+        plan.pieces.append(render.Piece(src=kit_file(asset), channels=2, start=0.0, end=length, at=at,
+                                        gain_db=gain + kit_offset, fade_in=0.01, fade_out=0.05, kind="effect",
+                                        label=label))
 
     # ---- teaser and montage
     teaser_len = sum(b - a for a, b in cold) - render.XFADE * max(0, len(cold) - 1)
@@ -323,19 +336,22 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
     for n, c in enumerate(segments):
         cue = (cycle[n % len(cycle)] if break_music == "tnh-cues-theocretus"
                else None if break_music == "none" else break_music)
+        sound = transition(c)
+        sound_len = sound[1] if sound else 0.0
         if cue:
             length = length_of(cue)
             lead = min(recipe["cues"].get(cue, (None, None))[1] or recipe["default_lead_in"], max(1.0, length - 2.0))
-            after = (flip_len - B["flip_before_end"]) if flip != "none" else B["resume_after_end"]
+            after = (sound_len - B["flip_before_end"]) if sound else B["resume_after_end"]
             gap = length - lead + max(0.0, after)
         else:
             length = lead = 0.0
-            gap = flip_len + B["no_music_gap"] if flip != "none" else B["no_music_gap"]
-        breaks.append((c, cue, length, lead, gap))
+            gap = sound_len + B["no_music_gap"]
+        breaks.append((c, cue, length, lead, gap, sound))
         gaps[float(c["time"])] = gaps.get(float(c["time"]), 0.0) + gap
-    if flip != "none":
-        for c in topics:
-            gaps[float(c["time"])] = gaps.get(float(c["time"]), 0.0) + recipe["topic"]["flip_after"] + flip_len
+    for c in topics:
+        sound = transition(c)
+        if sound:
+            gaps[float(c["time"])] = gaps.get(float(c["time"]), 0.0) + recipe["topic"]["flip_after"] + sound[1]
     pieces, to_finished, talk_end = render.conversation(voice_path, kept, talk_at, gaps)
     plan.pieces += pieces
     plan.talk_start, plan.talk_end = talk_at, talk_end
@@ -343,7 +359,7 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
     title_from = (m + M["title_at"]) if m is not None else max(0.0, talk_at - 0.5)
     title_in = recipe["fade_back"]
     spectrum_from = max(0.0, talk_at - M["spectrum_early"])
-    for c, cue, length, lead, gap in breaks:
+    for c, cue, length, lead, gap, sound in breaks:
         resume = to_finished(float(c["time"]))
         stop = resume - gap
         fade = max(0.5, lead - B["visuals_late"]) if cue else 0.5
@@ -358,15 +374,16 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
                 pic.layers.append(render.Layer("video", break_visuals, at=vis_at, length=resume + B["visuals_out"] - vis_at,
                                                start=B["visuals_start"], fade_in=stop - vis_at,
                                                fade_out=B["visuals_out"], label="Break visuals"))
-        if flip != "none":
-            flip_piece(resume - flip_len)
-        chapter_at[c["id"]] = resume - flip_len
+        if sound:
+            play(sound, resume - sound[1])
+        chapter_at[c["id"]] = resume - (sound[1] if sound else 0.0)
         title_from, spectrum_from = resume, resume
     for c in topics:
         resume = to_finished(float(c["time"]))
-        if flip != "none":
-            flip_piece(resume - flip_len)
-        chapter_at[c["id"]] = resume - flip_len
+        sound = transition(c)
+        if sound:
+            play(sound, resume - sound[1])
+        chapter_at[c["id"]] = resume - (sound[1] if sound else 0.0)
 
     # ---- the ending: music under the last minute of talk, then the sign-off over Full Flames
     signoff_at = talk_end + E["signoff_at"]

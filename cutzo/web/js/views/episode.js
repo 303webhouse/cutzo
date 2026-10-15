@@ -322,7 +322,7 @@ export async function render(main, params, ctx) {
     if (voiced) {
       body.append(h("section", { class: "panel" },
         h("h3", {}, "Voiced segment titles"),
-        h("p", { class: "muted" }, "Name a chapter like one of these and its voice clip plays at that chapter: The New Heretics, Define Your Terms, Why Should We Care, Building a Better Apostasy, Heretical Haiku, Logo Loses Us.")));
+        h("p", { class: "muted" }, "Name a chapter (after the first) like one of these and its voice clip plays there instead of the page flip: The New Heretics, Define Your Terms, Why Should We Care, Building a Better Apostasy, Heretical Haiku, Logo Loses Us.")));
     }
   }
 
@@ -334,23 +334,31 @@ export async function render(main, params, ctx) {
     api("/api/presets").then((presets) => {
       if (!draft.picks) draft.picks = new Set(ep.outputs);
       const pick = draft.picks;
+      for (const p of presets) if (p.kind === "video" && !ep.sample && (!ep.has_picture || !p.spec)) pick.delete(p.id);
       const main = presets.filter((p) => !p.reserve);
       const reserve = presets.filter((p) => p.reserve);
       const final = ep.final_duration || 0;
+      // Why a target can't be made for this episode (real episodes only), or null.
+      const blocked = (p) => {
+        if (ep.sample || p.kind !== "video") return null;
+        if (!ep.has_picture) return `${ep.show_name} is audio only.`;
+        if (!p.spec) return "Cutzo makes video at 1080p for now.";
+        return null;
+      };
       const option = (p) => h("label", { class: "choice" },
         h("input", {
           type: "checkbox",
           value: p.id,
-          checked: pick.has(p.id) && !(p.kind === "video" && !ep.sample),
-          disabled: p.kind === "video" && !ep.sample,
+          checked: pick.has(p.id) && !blocked(p),
+          disabled: !!blocked(p),
           onchange: (e) => { if (e.target.checked) pick.add(p.id); else pick.delete(p.id); draft.confirm = null; },
         }),
         h("span", {},
           h("b", {}, p.label),
           h("span", { class: "small muted" }, p.summary),
           h("span", { class: "small", style: { display: "block", marginTop: "4px" } },
-            p.kind === "video" && !ep.sample ? "Video exports arrive in Phase 3."
-              : `This episode: ${fmtSize((p.gb_per_hour * (ep.finished_duration || final)) / 3600)}${ep.sample ? " (sample length)" : ""}`)));
+            blocked(p) || `This episode: ${fmtSize((p.gb_per_hour * (ep.finished_duration || final)) / 3600)}${ep.sample ? " (sample length)" : ""}`
+              + (p.kind === "video" && !ep.sample ? ". Video takes a while; the first time, Cutzo also makes 1080p copies of the show's videos." : ""))));
       const confirmBox = h("div", {});
       const showConfirm = () => {
         clear(confirmBox);

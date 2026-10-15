@@ -1014,7 +1014,8 @@ class Cutzo:
             self._save(ep)
         self._log(source, "add_chapter", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
         show = showlib.get_show(ep["show"]) or {}
-        voiced = showlib.segment_title_for(show, title)
+        first = min(ep["chapters"], key=lambda c: c["time"])["id"] == chapter["id"]
+        voiced = None if first else showlib.segment_title_for(show, title)  # the first chapter starts the talk
         layout = self._layout(ep, show)
         at = None
         if layout:
@@ -1963,6 +1964,8 @@ class Cutzo:
         ordered = sorted(ep.get("chapters", []), key=lambda c: c["time"])
         chapters = [self._chapter_view(c, ep, show, layout.chapters[k]["time"] if layout else None)
                     for k, c in enumerate(ordered)]
+        if chapters:
+            chapters[0]["voiced_title"] = None  # the first chapter starts the talk: no title clip there
         if layout:
             view["finished_duration"] = round(layout.total, 3)
             view["finished_text"] = fmt_duration(layout.total)

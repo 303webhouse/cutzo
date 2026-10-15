@@ -96,6 +96,18 @@ def test_levels_follow_the_talk_and_unmeasured_cues_match_by_loudness():
     assert not [p for p in plan.pieces if p.label == "Page flip"] and plan.picture.spectrum == []
 
 
+def test_a_chapter_named_like_a_voiced_title_plays_it_instead_of_the_page_flip():
+    ep = copy.deepcopy(SPOOKY)
+    ep["chapters"][3]["title"] = "Heretical Haiku"
+    plan = _plan(ep)
+    voiced = [p for p in plan.pieces if p.label == "Voiced title"]
+    assert len(voiced) == 1 and str(voiced[0].src) == "tnh-seg-heretical-haiku"
+    assert voiced[0].length == pytest.approx(7.602)
+    assert len([p for p in plan.pieces if p.label == "Page flip"]) == 2
+    chapter = next(c for c in plan.chapters if c["title"] == "Heretical Haiku")
+    assert chapter["time"] == pytest.approx(voiced[0].at, abs=0.001)
+
+
 def test_without_montage_or_teaser_the_talk_starts_at_once():
     show = shows.get_show("the-new-heretics")
     ep = _ep(duration=600.0, chapters=[{"id": "c1", "time": 0, "title": "Start"}],
