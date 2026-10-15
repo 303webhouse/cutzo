@@ -219,6 +219,29 @@ def test_an_um_that_starts_a_run_of_talk_is_taken_out(tmp_path):
     assert uh_end - 0.01 <= b <= state_start + 0.01, b  # in the dip between "uh" and "state"
 
 
+def test_words_are_judged_cut_by_their_sound_not_their_stretched_times():
+    """Speech to text often stretches the last word before a pause into the pause, or puts a short
+    word wholly inside it. Shortening that pause mustn't strike those words through."""
+    from cutzo.core import build, transcript
+
+    env = np.full(500, -70.0)  # 5 s outline, 10 ms steps: silence...
+    env[100:160] = -20.0  # ...talk from 1.0 to 1.6 s ("a cheap guy.")
+    env[300:350] = -22.0  # ...talk again from 3.0 to 3.5 s ("And actually")
+    words = [{"w": "guy.", "s": 1.4, "e": 2.2},  # its end stretched 0.6 s into the pause
+             {"w": "me", "s": 1.75, "e": 1.95},  # wholly in the pause, just after the talk
+             {"w": "And", "s": 3.02, "e": 3.2},
+             {"w": "um", "s": 4.5, "e": 4.7}]  # in silence with no talk near: left alone
+    build.anchor_words(words, env, quiet=-42.0)
+    guy, me, and_, um = words
+    assert 1.4 <= guy["c"] < 1.6  # inside its sound
+    assert me["c"] == 1.595  # the nearest sound: the end of the talk before it
+    assert 3.02 <= and_["c"] <= 3.2
+    assert "c" not in um and transcript.anchor(um) == 4.6
+    dead_air = [(1.85, 2.75)]  # the pause after "guy." shortened, keeping a quarter second each side
+    assert not transcript.is_word_cut(guy, dead_air) and not transcript.is_word_cut(me, dead_air)
+    assert transcript.is_word_cut(guy, [(1.3, 1.7)])  # cutting the word itself still strikes it
+
+
 # ------------------------------------------------- transcription in the build
 @pytest.fixture()
 def real_dig(tmp_path, monkeypatch):

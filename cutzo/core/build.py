@@ -247,6 +247,9 @@ def transcribe(voice_path: Path, work: Path, sources: list[Source] | None = None
     finally:
         wav.unlink(missing_ok=True)
     words = result["words"]
+    report(0.96, "Matching words to the sound")
+    env = audio.envelope(audio.Pcm(voice_path))
+    anchor_words(words, env, audio.suggest_threshold(env))
     speakers: list[dict[str, str]] = []
     people = [s for s in (sources or []) if s.person and _track(s) is not None]
     if len(people) > 1:
@@ -255,6 +258,36 @@ def transcribe(voice_path: Path, work: Path, sources: list[Source] | None = None
         attribute_speakers(words, people, [sp["id"] for sp in speakers])
     return {"engine": f"parakeet-cli (whisper.cpp {tools.WHISPER.version})", "model": f"parakeet-{tools.PARAKEET_MODEL.version}",
             "speakers": speakers, "words": words}
+
+
+def anchor_words(words: list[dict[str, Any]], env: np.ndarray, quiet: float, reach: float = 0.6) -> None:
+    """Give each word a moment that is surely part of it ("c", seconds): the middle of its sound,
+    weighted by loudness; or, when its times fall wholly in a pause, the nearest sound within
+    `reach` seconds. Whether a word counts as cut goes by this moment (transcript.anchor), so a
+    word whose end speech to text stretched into the pause after it isn't struck through when
+    that pause is shortened. `env` is the voice's 10 ms loudness outline, `quiet` its silence level."""
+    hop, n = audio.HOP, len(env)
+    loud = env >= quiet
+    for w in words:
+        a = max(0, int(float(w["s"]) / hop))
+        b = min(n, max(a + 1, int(np.ceil(float(w["e"]) / hop))))
+        if a >= n:
+            continue
+        on = loud[a:b]
+        if on.any():
+            power = 10 ** (env[a:b][on].astype(np.float64) / 10)
+            t = (np.flatnonzero(on) + a + 0.5) * hop
+            w["c"] = round(float((t * power).sum() / power.sum()), 3)
+            continue
+        lo, hi = max(0, a - int(reach / hop)), min(n, b + int(reach / hop))
+        before, after = np.flatnonzero(loud[lo:a]), np.flatnonzero(loud[b:hi])
+        near = []
+        if len(before):
+            near.append((a - (lo + int(before[-1])), lo + int(before[-1])))
+        if len(after):
+            near.append((int(after[0]) + 1, b + int(after[0])))
+        if near:
+            w["c"] = round((min(near)[1] + 0.5) * hop, 3)
 
 
 def _track(s: Source) -> Path | None:

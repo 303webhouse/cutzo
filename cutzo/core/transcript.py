@@ -44,9 +44,16 @@ def span(words: list[dict[str, Any]], i: int, j: int) -> Range:
     return (float(words[i]["s"]), float(words[j - 1]["e"]))
 
 
+def anchor(word: dict[str, Any]) -> float:
+    """The moment that decides whether a word is cut: its sound's middle ("c", from the build),
+    or the middle of its times for transcripts made before Cutzo measured that."""
+    c = word.get("c")
+    return float(c) if c is not None else (float(word["s"]) + float(word["e"])) / 2
+
+
 def is_word_cut(word: dict[str, Any], cuts: list[Range]) -> bool:
-    mid = (float(word["s"]) + float(word["e"])) / 2
-    return any(a <= mid < b for a, b in cuts)
+    t = anchor(word)
+    return any(a <= t < b for a, b in cuts)
 
 
 def paragraphs(transcript: dict[str, Any], cuts: Iterable[Range] = (), gap: float = 1.6,

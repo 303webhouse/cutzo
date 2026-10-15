@@ -1677,7 +1677,7 @@ class Cutzo:
 
     def _words_between(self, ep_id: str, a: float, b: float) -> str:
         words = self._transcript(ep_id).get("words", [])
-        inside = [w["w"] for w in words if a <= (w["s"] + w["e"]) / 2 < b]
+        inside = [w["w"] for w in words if a <= tx.anchor(w) < b]
         return " ".join(inside)
 
     def _match_angle(self, angle: str, cams: list[str]) -> str:
