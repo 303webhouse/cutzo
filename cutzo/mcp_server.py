@@ -32,21 +32,25 @@ INSTRUCTIONS = f"""Cutzo is Nick's own podcast and video editor, running on his 
 Shows: The Dig (audio podcast, Denver Stiffs) and The New Heretics (video podcast with a fire
 background, audio spectrum and opening montage).
 
-This is Phase {PHASE}. Episodes marked sample are pretend data. Real episodes (The Dig so far)
-are built for real: Cutzo lines up the recordings, cleans the voices (noise removal, de-essing,
-leveling) and finds dead air, and export writes a real MP3 checked against the podcast rules.
-Real episodes have no transcript yet (Phase 3), so work with times there; video exports are Phase 3.
+This is Phase {PHASE}. Episodes marked sample are pretend data. Real episodes are built for real:
+Cutzo lines up the recordings, cleans the voices (noise removal, de-essing, leveling), writes down
+every word with its time (speech to text, fillers like "um" included) and finds dead air; export
+writes a real MP3 checked against the podcast rules. Video exports for The New Heretics are still
+being built in Phase 3.
 
 How to work:
-- Start with list_episodes, then get_episode (or get_transcript for sample episodes). Episodes can be
-  named loosely ("spooky", "debrief part 2"); ids work too.
+- Start with list_episodes, then get_episode and get_transcript. A 90-minute transcript is about
+  15,000 words: read it in stretches (start/end) when you only need part. An episode built before
+  speech to text was installed has no transcript: transcribe_episode makes one.
+- Cut by words with cut_words (exact words from the transcript; Cutzo cuts in the quiet between
+  words), or by time with cut_section. Episodes can be named loosely ("spooky", "debrief part 2").
 - Times are in the ORIGINAL recording, written like 12:03 or 1:02:45.5. Cutzo works out the finished
   file's times itself (intro, breaks and cuts included).
 - The Dig's finished file follows Nick's own layout: a cold open of highlights, the theme and sound
   bites, the conversation with a theme break and stinger before each new chapter, then sign-off clips.
   add_highlight picks the cold-open and sign-off stretches; chapters mark where segments start.
-- Long jobs (import_media, build_episode, export) return a job id at once; poll job_status.
-  Building a real episode takes a few minutes.
+- Long jobs (import_media, build_episode, transcribe_episode, export) return a job id at once; poll
+  job_status. Building a 90-minute episode takes about 15 minutes, transcribing alone about 4.
 - Every change is logged as "Claude" and shows up live in Cutzo's window. undo_last_change
   reverses the latest change; restore_cut brings back one cut by its id.
 - Safety: Cutzo never touches original recordings; it writes only in its own folders. Very
@@ -301,13 +305,32 @@ def job_status(job_id: Annotated[str, Field(description="The job id returned whe
 def get_transcript(
     episode: Episode,
     include_cut: Annotated[bool, Field(description="Also show words already cut, marked [cut: ...].")] = False,
+    start: Annotated[Union[str, float, None], Field(description="Optional: only from this recording time, e.g. '30:00'.")] = None,
+    end: Annotated[Union[str, float, None], Field(description="Optional: only up to this recording time, e.g. '45:00'.")] = None,
 ) -> str:
     """The episode's transcript with [m:ss] times per paragraph (original recording time). Use it to find
-    what to cut, to place chapters, and to write show notes in the chat. Real episodes get transcripts in Phase 3."""
-    t = engine.call("GET", _ep(episode) + "/transcript", query={"include_cut": str(include_cut).lower()})
-    head = (f"{t['title']} ({t['show']}). Speakers: {', '.join(t['speakers'])}. "
-            f"Recording {t['recording_length']}, finished {t['final_length']}.\n{t['note']}\n\n")
+    what to cut, to place chapters, and to write show notes in the chat. A 90-minute episode is about
+    15,000 words: read it in stretches with start/end when you only need part of it."""
+    query = {"include_cut": str(include_cut).lower()}
+    if start not in (None, ""):
+        query["start"] = str(start)
+    if end not in (None, ""):
+        query["end"] = str(end)
+    t = engine.call("GET", _ep(episode) + "/transcript", query=query)
+    speakers = ", ".join(t["speakers"]) or "not told apart (one combined recording)"
+    head = (f"{t['title']} ({t['show']}). Speakers: {speakers}. "
+            f"Recording {t['recording_length']}, finished {t['final_length']}."
+            + (f" Showing {t['stretch']}." if t.get("stretch") else "") + f"\n{t['note']}\n\n")
     return head + t["text"]
+
+
+@server.tool(annotations=CHANGE, structured_output=False)
+def transcribe_episode(episode: Episode) -> dict[str, Any]:
+    """Write down every word of a built episode with its time (speech to text on Nick's graphics card,
+    about 4 minutes for 90 minutes). Building does this too; use this for episodes built before, or
+    after a rebuild. Returns a job id to poll with job_status."""
+    res = engine.call("POST", _ep(episode) + "/transcribe", {})
+    return {"job": _job_brief(res["job"]), "note": res.get("note")}
 
 
 @server.tool(annotations=CHANGE, structured_output=False)

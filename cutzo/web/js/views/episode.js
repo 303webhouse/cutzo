@@ -111,14 +111,16 @@ export async function render(main, params, ctx) {
               ? [h("span", {}, "Recording ", h("b", {}, fmtDur(ep.duration))),
                  h("span", {}, "After cuts ", h("b", {}, fmtDur(ep.final_duration))),
                  ep.finished_duration ? h("span", { title: "With the intro, breaks and ending" }, "Finished file ", h("b", {}, fmtDur(ep.finished_duration))) : null,
-                 h("span", {}, plural(ep.cut_count - (ep.pause_count || 0), "cut"),
-                   ep.pause_count ? `, ${plural(ep.pause_count, "pause")} shortened` : "", ", ", plural(ep.chapter_count, "chapter"))]
+                 h("span", {}, [
+                   ep.cut_count > (ep.pause_count || 0) || !ep.pause_count ? plural(ep.cut_count - (ep.pause_count || 0), "cut") : null,
+                   ep.pause_count ? `${plural(ep.pause_count, "pause")} shortened` : null,
+                   plural(ep.chapter_count, "chapter")].filter(Boolean).join(", "))]
               : h("span", {}, plural(ep.media_count, "recording"), ", not built yet"))),
         h("div", { class: "row" }, undo)),
       h("ol", { class: "stages", "aria-label": "Steps" },
         ep.stages.map((s) => h("li", { class: s.status },
           h("span", { class: "mark", svg: s.status === "done" ? icons.check : "" }),
-          h("span", {}, s.label, s.status === "later" ? h("span", { class: "later-note" }, " (Phase 3)") : null),
+          h("span", {}, s.label, s.status === "later" ? h("span", { class: "later-note" }, " (not yet)") : null),
           h("span", { class: "sr-only", style: { position: "absolute", left: "-9999px" } }, `: ${statusWord(s.status)}`)))),
       nextStep(next),
     ]);
@@ -140,11 +142,12 @@ export async function render(main, params, ctx) {
       "Add recordings": ["Add the raw recordings", "Paste the paths of the files, or the folder they're in."],
       "Build episode": ["Build the episode", ep.sample
         ? "Cutzo lines up the recordings, cleans the voices, writes the transcript and suggests cuts."
-        : "Cutzo lines up the recordings, cleans the voices and finds dead air. A long episode takes a few minutes."],
+        : "Cutzo lines up the recordings, cleans the voices, writes down every word and finds dead air. A 90-minute episode takes about 15 minutes."],
       "Build again": ["Build again", "New recordings or a new cleanup setting. Your own cuts, chapters and picks stay."],
       "Review cuts": ["Review the episode", ep.has_transcript
-        ? "Read the transcript, bring back anything you want to keep, then export."
-        : "Listen through, mark chapters and the cold open, check the dead-air cuts, then export."],
+        ? "Read the transcript and select words to cut them, mark chapters and the cold open, then export."
+        : ep.sample ? "Listen through, mark chapters and the cold open, check the dead-air cuts, then export."
+          : "No transcript yet. Transcribe it (about 4 minutes) to cut by words, or listen through and cut by time."],
       "See exports": ["Exported", "The finished files and their checks are on the Export tab."],
     }[next.label] || [next.label, ""];
     let button;
@@ -155,11 +158,20 @@ export async function render(main, params, ctx) {
     } else {
       button = h("a", { class: `btn ${next.quiet ? "" : "btn-primary"}`, href: `#/episode/${encodeURIComponent(ep.id)}/${next.tab}` }, next.label);
     }
-    return h("div", { class: "next-step" }, h("p", {}, h("strong", {}, copy[0]), copy[1]), button);
+    const extra = next.label === "Review cuts" && needsTranscript()
+      ? h("button", { class: "btn btn-primary", onclick: transcribe }, "Transcribe") : null;
+    if (extra) button.classList.remove("btn-primary");
+    return h("div", { class: "next-step" }, h("p", {}, h("strong", {}, copy[0]), copy[1]), h("div", { class: "row" }, extra, button));
   }
+
+  const needsTranscript = () => !ep.sample && built() && !ep.has_transcript;
 
   async function build() {
     await act(() => api(epPath(ep.id) + "/build", { method: "POST", body: {} }), "Building started. Progress shows on the left.");
+  }
+
+  async function transcribe() {
+    await act(() => api(epPath(ep.id) + "/transcribe", { method: "POST", body: {} }), "Transcribing started. Progress shows on the left.");
   }
 
   async function removeEpisode() {
@@ -271,12 +283,15 @@ export async function render(main, params, ctx) {
             : h("ol", { class: "steps-list" },
                 h("li", {}, h("b", {}, "Sync: "), "lines up everyone's recordings (StreamYard's file names, then by sound)."),
                 h("li", {}, h("b", {}, "Podcast voice: "), "removes background noise, softens harsh S sounds, evens out voices."),
-                h("li", {}, h("b", {}, "Auto-edit: "), "finds long silences and suggests shortening them."),
-                h("li", {}, h("b", {}, "Transcribe: "), "arrives in Phase 3.")),
+                h("li", {}, h("b", {}, "Transcribe: "), "writes down every word with its time, “um”s included, on your graphics card."),
+                h("li", {}, h("b", {}, "Auto-edit: "), "finds long silences and suggests shortening them.")),
           built() ? h("p", { class: "small muted" }, "Building again replaces Cutzo's suggestions. Your own cuts and chapters, and Claude's, stay.") : null,
           ep.sample ? h("p", { class: "small muted" }, "Sample episode: these steps are pretend and use a short test clip.") : null,
           ep.voice_settings ? cleanupControl() : null,
-          h("button", { class: "btn btn-primary", disabled: !media.length || (ep.busy || []).length > 0, onclick: build }, built() ? "Build again" : "Build episode"))),
+          h("div", { class: "row" },
+            h("button", { class: "btn btn-primary", disabled: !media.length || (ep.busy || []).length > 0, onclick: build }, built() ? "Build again" : "Build episode"),
+            needsTranscript() ? h("button", { class: "btn", disabled: (ep.busy || []).length > 0, onclick: transcribe }, "Just transcribe") : null),
+          needsTranscript() ? h("p", { class: "small muted" }, "Built before speech to text was installed? Just transcribe: about 4 minutes, nothing else changes.") : null)),
       h("p", { class: "small muted", style: { marginTop: "8px" } },
         "Done with this episode in Cutzo? ",
         h("button", { class: "btn btn-quiet btn-small", onclick: removeEpisode }, "Remove it from Cutzo"),

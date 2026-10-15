@@ -19,7 +19,7 @@ import threading
 import traceback
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Optional, Union
 from urllib.parse import urlparse
 
 from . import __version__
@@ -239,8 +239,14 @@ def create_app(cutzo: Cutzo, *, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         return cutzo.build_episode(episode, body.template, source=source_of(request))
 
     @app.get("/api/episodes/{episode}/transcript")
-    def transcript(episode: str, request: Request, include_cut: bool = False, format: str = "text"):
-        return cutzo.get_transcript(episode, include_cut=include_cut, fmt=format, source=source_of(request))
+    def transcript(episode: str, request: Request, include_cut: bool = False, format: str = "text",
+                   start: Optional[str] = None, end: Optional[str] = None):
+        return cutzo.get_transcript(episode, include_cut=include_cut, fmt=format, source=source_of(request),
+                                    start=start, end=end)
+
+    @app.post("/api/episodes/{episode}/transcribe")
+    def transcribe(episode: str, request: Request):
+        return cutzo.transcribe(episode, source=source_of(request))
 
     @app.get("/api/episodes/{episode}/waveform")
     def waveform(episode: str, buckets: int = 1200, start: float | None = None, end: float | None = None):

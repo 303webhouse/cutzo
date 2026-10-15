@@ -25,7 +25,7 @@ from typing import Any, Iterable
 from .. import PHASE, __version__
 from .. import tools as toolbox
 from ..tools import ffmpeg
-from . import audio, kit, presets, recipes, render, sample, timeline
+from . import audio, cutpoints, kit, presets, recipes, render, sample, timeline
 from . import build as buildlib
 from . import shows as showlib
 from . import transcript as tx
@@ -65,12 +65,13 @@ BIG_CUT_SHARE = 0.25
 PHASE1_NOTE = "Sample episode: pretend data, nothing is rendered and your real files are never touched."
 SAMPLE_EXPORT_NOTE = "Sample episode: the export is pretend, so no file is written."
 SAMPLE_BUILD_NOTE = "Sample episode: the steps are pretend and use a short test clip instead of a real recording."
-REAL_NOTE = ("Real episode: Cutzo reads your recordings (never changes them), cleans the voices and finds dead air. "
-             "Transcripts arrive in Phase 3.")
-REAL_BUILD_NOTE = "Lines up the recordings, cleans the voices and finds dead air. A long episode takes a few minutes."
-ENGINE_NOTE = "Phase 2: real audio for The Dig. Sample episodes stay pretend; video and transcripts arrive in Phase 3."
-NO_TRANSCRIPT = ("This episode has no transcript yet; transcripts arrive in Phase 3. "
-                 "For now, cut by time: give the start and end.")
+REAL_NOTE = ("Real episode: Cutzo reads your recordings (never changes them), cleans the voices, writes down every "
+             "word and finds dead air.")
+REAL_BUILD_NOTE = ("Lines up the recordings, cleans the voices, writes down every word and finds dead air. "
+                   "A 90-minute episode takes about 15 minutes.")
+ENGINE_NOTE = "Phase 3: transcripts for real episodes; The New Heretics' video is on its way. Sample episodes stay pretend."
+NO_TRANSCRIPT = ("This episode has no transcript yet. Transcribe it (it takes a few minutes), then cut by words. "
+                 "Until then, cut by time.")
 ANGLE_ALIASES = {"everyone", "all", "wide", "grid", "group", "everybody"}
 
 
@@ -536,7 +537,9 @@ class Cutzo:
         settings = VoiceSettings.from_dict(self._voice_settings(ep, show))
         ep_dir = self._ep_dir(ep_id)
         work = self.guard.writable(ep_dir / "work")
-        share = {"sync": (0.0, 0.12), "voice": (0.12, 0.82), "auto_edit": (0.94, 0.06)}
+        transcribe = toolbox.available("whisper-cli", "whisper-model")
+        share = ({"sync": (0.0, 0.08), "voice": (0.08, 0.58), "transcribe": (0.66, 0.28), "auto_edit": (0.94, 0.06)}
+                 if transcribe else {"sync": (0.0, 0.12), "voice": (0.12, 0.82), "auto_edit": (0.94, 0.06)})
 
         def reporter(key: str, label: str):
             base, size = share[key]
@@ -581,7 +584,22 @@ class Cutzo:
             report(0.97, "Measuring how loud the talking is")
             self._talk_loudness(ep_id, check=ctx.check)
             self._set_stage(ep_id, "voice", "done")
-            self._set_stage(ep_id, "transcribe", "later")
+
+            if transcribe:
+                current = "transcribe"
+                self._set_stage(ep_id, "transcribe", "running")
+                report = reporter("transcribe", "Transcribe")
+                report(0.0, STAGE_DETAIL["transcribe"])
+                data = buildlib.transcribe(ep_dir / "voice.f32", work, sources, check=ctx.check, report=report)
+                self._save_transcript(ep_id, data)
+                self._set_stage(ep_id, "transcribe", "done")
+            else:
+                self._set_stage(ep_id, "transcribe", "later")
+                with self._lock:
+                    ep = self._load(ep_id)
+                    note = "Speech to text isn't installed yet: double-click Update Cutzo, then Transcribe this episode."
+                    ep["build_notes"] = [n for n in ep.get("build_notes", []) if n != note] + [note]
+                    self._save(ep)
 
             current = "auto_edit"
             self._set_stage(ep_id, "auto_edit", "running")
@@ -602,6 +620,71 @@ class Cutzo:
             "suggested_cuts": len(found),
             "notes": ep.get("build_notes", []),
         }
+
+    def _save_transcript(self, ep_id: str, data: dict[str, Any]) -> None:
+        """Store a real transcript (recording time) and let edits find it."""
+        write_json(self.guard.writable(self._ep_dir(ep_id) / "transcript.json"), {
+            "speakers": data.get("speakers") or [],
+            "words": data.get("words") or [],
+            "engine": data.get("engine"),
+            "model": data.get("model"),
+            "made": now_iso(),
+        })
+        with self._lock:
+            ep = self._load(ep_id)
+            ep["build_notes"] = [n for n in ep.get("build_notes", []) if not n.startswith("Speech to text isn't installed")]
+            self._save(ep)
+
+    def transcribe(self, episode: str, source: str = "you") -> dict[str, Any]:
+        """Write down every word of a real episode that was built before speech to text was installed
+        (or again, after a rebuild). Returns a job id."""
+        ep_id = self.resolve_episode(episode)
+        ep = self._load(ep_id)
+        if ep.get("sample"):
+            raise CutzoError("Sample episodes come with a sample transcript already.")
+        if not (self._ep_dir(ep_id) / "voice.f32").exists() or not ep.get("duration"):
+            raise CutzoError("Build the episode first; the transcript is made from its cleaned voices.")
+        toolbox.require("ffmpeg")
+        toolbox.require("whisper-cli")
+        toolbox.require_file("whisper-model")
+        with self._lock:
+            self._refuse_if_busy(ep_id, "transcribe")
+            job = self.jobs.submit(kind="transcribe", title=f"Transcribe {ep['title']}", episode=ep_id, source=source,
+                                   steps=["Transcribe"], work=self._transcribe_work(ep_id))
+        self._log(source, "transcribe", f"Started transcribing \u201c{ep['title']}\u201d", ep_id, details={"job": job["id"]})
+        return {"job": job, "note": "Writes down every word with its time; about 4 minutes for a 90-minute episode."}
+
+    def _transcribe_work(self, ep_id: str):
+        def work(ctx: JobContext) -> dict[str, Any]:
+            ep = self._load(ep_id)
+            ep_dir = self._ep_dir(ep_id)
+            work_dir = self.guard.writable(ep_dir / "work")
+            done = False
+            self._set_stage(ep_id, "transcribe", "running")
+            try:
+                sources: list[buildlib.Source] = []
+                used = [m for m in ep["media"] if (m.get("sync") or {}).get("used") and m.get("person")]
+                if len(used) > 1:  # several people on their own tracks: decode them to tell who speaks
+                    ctx.step("Transcribe", 0.0, "Reading everyone's tracks")
+                    chosen = [m for m in ep["media"] if (m.get("sync") or {}).get("used")]
+                    sources, _ = buildlib.decode_sources(chosen, None, work_dir, check=ctx.check,
+                                                         report=lambda p, label: ctx.step("Transcribe", 0.05 * p, label))
+                    offsets = {m["id"]: float((m.get("sync") or {}).get("offset") or 0.0) for m in chosen}
+                    for src in sources:
+                        src.offset = offsets.get(src.media_id, 0.0)
+                data = buildlib.transcribe(ep_dir / "voice.f32", work_dir, sources, check=ctx.check,
+                                           report=lambda p, detail: ctx.step("Transcribe", 0.05 + 0.95 * p, detail))
+                self._save_transcript(ep_id, data)
+                done = True
+            finally:
+                had = bool(self._transcript(ep_id).get("words"))
+                self._set_stage(ep_id, "transcribe", "done" if done or had else "later")
+                buildlib.tidy(ep_dir)
+            n = len(data["words"])
+            return {"summary": f"Transcribed \u201c{ep['title']}\u201d: {n:,} words. Select words in Review to cut them.",
+                    "words": n}
+
+        return work
 
     def _apply_real_auto_edit(self, ep_id: str) -> list[dict[str, Any]]:
         """Suggest dead-air cuts from the cleaned voice track, keeping your own cuts and anything you brought back."""
@@ -680,13 +763,15 @@ class Cutzo:
 
     # ========================================================== transcript
     def get_transcript(self, episode: str, include_cut: bool = False, fmt: str = "text",
-                       source: str = "you") -> dict[str, Any]:
+                       source: str = "you", start: Any = None, end: Any = None) -> dict[str, Any]:
         ep = self._load(self.resolve_episode(episode))
         tr = self._transcript(ep["id"])
+        a = parse_time(start, name="start") if start not in (None, "") else None
+        b = parse_time(end, name="end") if end not in (None, "") else None
         if not tr.get("words"):
             if not ep.get("sample"):
-                raise CutzoError("This episode has no transcript yet; transcripts arrive in Phase 3.",
-                                 hint="For now, find moments by time (the waveform in Cutzo shows where people talk).")
+                raise CutzoError("This episode has no transcript yet.",
+                                 hint="Transcribe it first (transcribe_episode); it takes a few minutes.")
             raise CutzoError("This episode hasn't been transcribed yet.",
                              hint="Build the episode first; transcription is one of its steps.")
         self._log_read(source, "get_transcript", f"read the transcript of {_q(ep['title'], 40)}", ep["id"])
@@ -706,7 +791,13 @@ class Cutzo:
             out["speakers_detail"] = tr.get("speakers", [])
             out["paragraphs"] = tx.paragraphs(tr, cuts)
         else:
-            out["text"] = tx.as_text(tr, cuts, include_cut=include_cut)
+            part = tr
+            if a is not None or b is not None:  # just a stretch of a long episode
+                lo, hi = a if a is not None else 0.0, b if b is not None else float("inf")
+                part = {**tr, "words": [w for w in tr.get("words", []) if lo <= float(w["s"]) < hi]}
+                out["stretch"] = f"{fmt_time(lo)} to {fmt_time(hi) if hi != float('inf') else 'the end'}"
+            out["text"] = tx.as_text(part, cuts, include_cut=include_cut)
+            out["words"] = len(part.get("words", []))
         return out
 
     def waveform(self, episode: str, buckets: int = 1200, start: float | None = None,
@@ -774,6 +865,8 @@ class Cutzo:
             b = min(b, duration)
             if b - a < 0.05:
                 raise CutzoError("That's too short to cut (under a twentieth of a second).")
+            if reason == "words" and not ep.get("sample"):
+                a, b = self._word_cut_points(ep, a, b)
             self._check_big_cut(b - a, duration, confirm)
             words = self._words_between(ep["id"], a, b)
             edit = self._new_edit(ep, type="cut", start=a, end=b, reason=reason, text=words, by=source)
@@ -825,11 +918,13 @@ class Cutzo:
             self._check_big_cut(total, float(ep["duration"]), confirm)
             made = []
             for i, j in chosen:
-                a, b = tx.span(words, i, j)
                 said = " ".join(w["w"] for w in words[i:j])
-                made.append(self._new_edit(ep, type="cut", start=round(max(0.0, a - 0.02), 3),
-                                           end=round(min(float(ep["duration"]), b + 0.04), 3),
-                                           reason="words", text=said, by=source))
+                if ep.get("sample"):
+                    a, b = tx.span(words, i, j)
+                    a, b = round(max(0.0, a - 0.02), 3), round(min(float(ep["duration"]), b + 0.04), 3)
+                else:
+                    a, b = cutpoints.word_cut(self._ep_dir(ep["id"]) / "voice.f32", words, i, j, float(ep["duration"]))
+                made.append(self._new_edit(ep, type="cut", start=a, end=b, reason="words", text=said, by=source))
             ep["edits"].extend(made)
             where = ", ".join(fmt_time(m["start"]) for m in made)
             summary = f"Cut the words \u201c{_q(text)}\u201d at {where}"
@@ -1535,7 +1630,8 @@ class Cutzo:
         busy = self.jobs.active_for(ep_id)
         if busy:
             job = busy[0]
-            doing = {"build": "building", "export": "exporting", "import": "importing"}.get(job["kind"], "working on")
+            doing = {"build": "building", "export": "exporting", "import": "importing",
+                     "transcribe": "transcribing"}.get(job["kind"], "working on")
             raise CutzoError(f"Cutzo is still {doing} this episode (job {job['id']}). Try again when it finishes.",
                              data={"job": job["id"]})
 
@@ -1570,6 +1666,14 @@ class Cutzo:
         if not ep.get("duration"):
             return None
         return round(timeline.total(timeline.kept(float(ep["duration"]), self._cuts(ep))), 3)
+
+    def _word_cut_points(self, ep: dict[str, Any], a: float, b: float) -> tuple[float, float]:
+        """A cut made by selecting words: move its edges to the quiet between words."""
+        words = self._transcript(ep["id"]).get("words", [])
+        run = cutpoints.words_in(words, a, b) if words else None
+        if not run:
+            return a, b
+        return cutpoints.word_cut(self._ep_dir(ep["id"]) / "voice.f32", words, run[0], run[1], float(ep["duration"]))
 
     def _words_between(self, ep_id: str, a: float, b: float) -> str:
         words = self._transcript(ep_id).get("words", [])

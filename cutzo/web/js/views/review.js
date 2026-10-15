@@ -1,8 +1,8 @@
 // Review: the deck (preview, player, waveform with spliced-out cuts) above the
 // transcript, which you mark up like a script: select words to cut them, click
-// struck words to bring them back. Real episodes have no transcript until Phase 3:
-// there the deck adds a zoomed waveform for precise selections, a switch to hear the
-// original sound, and the panel below holds the cold open, sign-off and dead-air settings.
+// struck words to bring them back. Real episodes also get a zoomed waveform for precise
+// selections, a switch to hear the original sound, and a panel above the transcript with
+// the cold open, sign-off and dead-air settings (the panel alone until they're transcribed).
 
 import { api, epPath } from "../api.js";
 import { h, add, clear, icons, fmtTime, fmtDur, plural, toast, toastError, confirmDialog } from "../ui.js";
@@ -73,7 +73,9 @@ export function mountReview(container, initialEp, ctx) {
       h("div", { class: "wave-area" }, flags, wave, zoomArea, camLabel, camLane),
       selbar),
     audio);
-  const script = h("section", { class: "script", "aria-label": "Transcript" }, h("p", { class: "muted" }, "Loading the transcript…"));
+  const panelBox = h("div", { class: "panel-box" });
+  const textBox = h("div", { class: "text-box" }, h("p", { class: "muted" }, "Loading the transcript…"));
+  const script = h("section", { class: "script", "aria-label": "Transcript" }, panelBox, textBox);
   const side = h("aside", { class: "side", "aria-label": "Cuts and chapters" });
   add(container, [deck, h("div", { class: "review" }, script, side)]);
   const floatBar = h("div", { class: "float-bar", role: "toolbar", "aria-label": "Selection", hidden: true });
@@ -157,11 +159,12 @@ export function mountReview(container, initialEp, ctx) {
 
   // -------------------------------------------------------- transcript
   function drawScript() {
-    if (!ep.has_transcript) return drawPanel();
+    if (real) drawPanel();
+    clear(textBox);
+    if (!ep.has_transcript) return;
     const nowCut = new Set(words.filter((w) => w && w.cut).map((w) => w.i));
-    clear(script);
     wordEls = new Map();
-    add(script, h("div", { class: "script-head" },
+    add(textBox, h("div", { class: "script-head", style: { marginTop: real ? "26px" : "0" } },
       h("h3", {}, "Transcript"),
       h("p", {}, "Select words to cut them. Click struck words to bring them back.")));
     for (const p of paragraphs) {
@@ -199,23 +202,22 @@ export function mountReview(container, initialEp, ctx) {
         }
         if (n < segments.length - 1) text.append(" ");
       });
-      script.append(h("div", { class: "para" },
+      textBox.append(h("div", { class: "para" },
         h("div", { class: "who-col" },
-          h("span", { class: "who-name" }, p.speaker),
+          h("span", { class: "who-name" }, p.speaker_id || ep.sample ? p.speaker : ""),
           h("button", { class: "para-time", title: "Play from here", onclick: () => seek(p.start, true) }, fmtTime(p.start))),
         text));
     }
-    script.append(h("p", { class: "script-tip" },
+    textBox.append(h("p", { class: "script-tip" },
       "Keys: Space plays or pauses, the arrow keys move a second (Shift for five), Ctrl+Z undoes the last change.",
-      ep.sample ? " This transcript is sample text." : ""));
+      ep.sample ? " This transcript is sample text." : " Cuts land in the quiet between words."));
     prevCut = nowCut;
     nowIndex = -1;
   }
 
-  // A real episode before Phase 3: no transcript, so this panel holds the cold open,
-  // the sign-off and how tight the dead-air trimming is.
+  // Real episodes: the cold open, the sign-off and how tight the dead-air trimming is.
   function drawPanel() {
-    clear(script);
+    clear(panelBox);
     const recipe = ep.show === "the-dig";
     if (recipe) {
       const picks = ep.picks || { cold_open: [], outro: [] };
@@ -237,7 +239,7 @@ export function mountReview(container, initialEp, ctx) {
                 }, "Remove"))))
             : h("p", { class: "muted small" }, empty));
       };
-      add(script, [
+      add(panelBox, [
         h("div", { class: "script-head" }, h("h3", {}, "How the episode opens and closes"),
           h("p", {}, "Drag across the waveform, then choose Add to cold open or Add to sign-off.")),
         h("div", { class: "two-col" },
@@ -252,7 +254,7 @@ export function mountReview(container, initialEp, ctx) {
     const keep = h("input", { type: "text", inputmode: "decimal", "aria-label": "Shrink them to (seconds)", value: deadDraft.keep ?? String(da.keep), oninput: (e) => { deadDraft.keep = e.target.value; } });
     const deadCuts = ep.edits.filter((e) => e.type === "cut" && e.reason === "dead air");
     const saved = deadCuts.reduce((t, e) => t + e.length, 0);
-    add(script, [
+    add(panelBox, [
       h("div", { class: "script-head", style: { marginTop: recipe ? "18px" : "0" } }, h("h3", {}, "Dead air"),
         h("p", {}, `${plural(deadCuts.length, "long silence")} shortened, ${fmtDur(saved)} out`)),
       h("form", {
@@ -266,10 +268,10 @@ export function mountReview(container, initialEp, ctx) {
         h("span", {}, "Shorten silences longer than"), longer, h("span", {}, "seconds to"), keep, h("span", {}, "seconds."),
         h("button", { class: "btn btn-small", type: "submit" }, "Apply")),
       h("p", { class: "small muted" }, "Smaller numbers make the conversation tighter. Cuts you brought back stay back."),
-      h("p", { class: "script-tip" },
-        "No transcript yet: transcripts arrive in Phase 3. Find moments with the waveform; the close-up under it shows ",
-        `${zoom.span} seconds around the playhead for precise selections. Keys: Space plays or pauses, the arrow keys move a second `,
-        "(Shift for five), Ctrl+Z undoes the last change."),
+      ep.has_transcript ? null : h("p", { class: "script-tip" },
+        "No transcript yet: use Transcribe at the top (about 4 minutes) to cut by words. Meanwhile, find moments with the ",
+        `waveform; the close-up under it shows ${zoom.span} seconds around the playhead for precise selections. Keys: Space `,
+        "plays or pauses, the arrow keys move a second (Shift for five), Ctrl+Z undoes the last change."),
     ]);
   }
 
@@ -800,7 +802,7 @@ export function mountReview(container, initialEp, ctx) {
       }, sec < 60 ? `${sec} s` : `${sec / 60} min`)));
   }
   function drawScriptTipSpan() {
-    if (!ep.has_transcript) drawPanel();
+    if (real && !ep.has_transcript) drawPanel();
   }
   function follow(t, force = false) {
     if (!zoomOn()) return;
@@ -1031,8 +1033,8 @@ export function mountReview(container, initialEp, ctx) {
     try {
       await Promise.all([loadTranscript(), loadWave()]);
     } catch (err) {
-      clear(script);
-      script.append(h("p", { class: "form-error" }, `Couldn't load the review: ${err.message}`));
+      clear(textBox);
+      textBox.append(h("p", { class: "form-error" }, `Couldn't load the review: ${err.message}`));
       return;
     }
     if (destroyed) return;

@@ -20,7 +20,8 @@ from typing import Any, Callable
 
 import numpy as np
 
-from ..tools import ffmpeg
+from .. import tools
+from ..tools import ffmpeg, whisper
 from . import audio
 from .errors import CutzoError
 from .voice import VoiceSettings, clean
@@ -228,6 +229,61 @@ def _pairs(silences: list[tuple[float, float]], longer_than: float, keep: float,
             kept_silences.append((a, b))
             cuts.append(made[0])
     return kept_silences, cuts
+
+
+def transcribe(voice_path: Path, work: Path, sources: list[Source] | None = None, *, report: Report,
+               check: Check) -> dict[str, Any]:
+    """Speech to text over the cleaned conversation (recording time). With separate tracks for
+    several people, each word goes to whoever is loudest while it is said."""
+    work.mkdir(parents=True, exist_ok=True)
+    total = audio.Pcm(voice_path).duration
+    wav = work / "speech-16k.wav"
+    report(0.0, "Getting the audio ready")
+    ffmpeg.run([*ffmpeg.raw_input_args(voice_path, 1), "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-f", "wav",
+                str(wav)], duration=total, check=check, progress=lambda p: report(0.04 * p, "Getting the audio ready"))
+    try:
+        result = whisper.transcribe(wav, work_dir=work, check=check,
+                                    progress=lambda p: report(0.04 + 0.92 * p, "Writing down every word"))
+    finally:
+        wav.unlink(missing_ok=True)
+    words = result["words"]
+    speakers: list[dict[str, str]] = []
+    people = [s for s in (sources or []) if s.person and _track(s) is not None]
+    if len(people) > 1:
+        report(0.97, "Working out who said what")
+        speakers = [{"id": f"S{k + 1}", "name": s.person or s.name} for k, s in enumerate(people)]
+        attribute_speakers(words, people, [sp["id"] for sp in speakers])
+    return {"engine": f"whisper.cpp {tools.WHISPER.version}", "model": tools.WHISPER_MODEL.version,
+            "speakers": speakers, "words": words}
+
+
+def _track(s: Source) -> Path | None:
+    for path in (s.cleaned, s.raw):
+        if path is not None and Path(path).exists():
+            return Path(path)
+    return None
+
+
+def attribute_speakers(words: list[dict[str, Any]], people: list[Source], ids: list[str]) -> None:
+    """Mark each word with the speaker whose own track is loudest while it is said."""
+    hop = audio.HOP
+    outlines = []
+    for s in people:
+        env = audio.envelope(audio.Pcm(_track(s)))  # in the track's own time
+        outlines.append((env, s.offset))
+    for w in words:
+        best, best_level = None, -1e9
+        for (env, offset), sid in zip(outlines, ids):
+            a = int((float(w["s"]) - offset) / hop)
+            b = max(a + 1, int((float(w["e"]) - offset) / hop))
+            if b <= 0 or a >= len(env):
+                continue
+            seg = env[max(0, a):min(len(env), b)]
+            level = float(np.mean(10 ** (seg / 10.0))) if len(seg) else 0.0
+            if level > best_level:
+                best, best_level = sid, level
+        if best:
+            w["sp"] = best
 
 
 def tidy(ep_dir: Path) -> None:

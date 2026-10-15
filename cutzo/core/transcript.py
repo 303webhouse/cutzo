@@ -49,16 +49,22 @@ def is_word_cut(word: dict[str, Any], cuts: list[Range]) -> bool:
     return any(a <= mid < b for a, b in cuts)
 
 
-def paragraphs(transcript: dict[str, Any], cuts: Iterable[Range] = (), gap: float = 1.6) -> list[dict[str, Any]]:
-    """Group words into speaker turns; a long pause also starts a new paragraph."""
+def paragraphs(transcript: dict[str, Any], cuts: Iterable[Range] = (), gap: float = 1.6,
+               soft: int = 45, hard: int = 120) -> list[dict[str, Any]]:
+    """Group words into speaker turns; a long pause also starts a new paragraph. Without speakers
+    (one combined recording) turns run long, so after `soft` words a sentence end starts a new
+    paragraph, and `hard` words always do."""
     merged = merge(cuts)
     names = {s["id"]: s["name"] for s in transcript.get("speakers", [])}
     out: list[dict[str, Any]] = []
     for idx, w in enumerate(transcript.get("words", [])):
+        size = len(out[-1]["words"]) if out else 0
         new_para = (
             not out
             or out[-1]["speaker_id"] != w.get("sp")
             or float(w["s"]) - out[-1]["end"] > gap
+            or (size >= soft and out[-1]["words"][-1]["w"].rstrip("\"'”’)").endswith((".", "?", "!")))
+            or size >= hard
         )
         if new_para:
             out.append({
@@ -96,5 +102,6 @@ def as_text(transcript: dict[str, Any], cuts: Iterable[Range] = (), *, include_c
             pieces.append(f"[cut: {' '.join(run)}]")
         text = " ".join(pieces).strip()
         if text:
-            lines.append(f"[{fmt_time(para['start'])}] {para['speaker']}: {text}")
+            who = f"{para['speaker']}: " if para.get("speaker_id") else ""  # one combined recording: nobody to name
+            lines.append(f"[{fmt_time(para['start'])}] {who}{text}")
     return "\n".join(lines)
