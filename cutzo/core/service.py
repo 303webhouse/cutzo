@@ -26,6 +26,7 @@ from .. import PHASE, __version__
 from .. import tools as toolbox
 from ..tools import ffmpeg
 from . import audio, cutpoints, kit, presets, recipes, render, sample, timeline, titles
+from . import captions as captionslib
 from . import video as videolib
 from . import build as buildlib
 from . import shows as showlib
@@ -1361,6 +1362,7 @@ class Cutzo:
                         ep["stages"]["export"] = "done"
                         self._save(ep)
                     entries.append(entry)
+                extras = self._write_captions(ep_id, layout, plan)
             finally:
                 mix_path.unlink(missing_ok=True)
                 shutil.rmtree(work_dir, ignore_errors=True)
@@ -1368,8 +1370,34 @@ class Cutzo:
             labels = ", ".join(e["label"] for e in entries)
             summary = f"Exported {labels} ({entries[0]['final_length']})." if entries else "Nothing exported."
             summary += " Some checks failed; see the Export tab." if failed else " All checks passed."
-            return {"summary": summary, "exports": entries}
+            if extras.get("captions_file"):
+                summary += " Captions and the chapter list are saved next to it."
+            elif extras.get("chapters_file"):
+                summary += " The chapter list is saved next to it (no captions: the episode has no transcript)."
+            return {"summary": summary, "exports": entries, "extras": extras}
         return work
+
+    def _write_captions(self, ep_id: str, layout: render.Plan, plan: list[dict[str, Any]]) -> dict[str, Any]:
+        """Captions (.srt) and the YouTube chapter list (.txt) beside the exports, timed to the finished file
+        (the same layout the exports were rendered from)."""
+        first = Path(plan[0]["file"])
+        stem = first.name.rsplit(" - ", 1)[0]
+        out: dict[str, Any] = {"at": now_iso()}
+        words = self._transcript(ep_id).get("words", [])
+        if words:
+            items = captionslib.cues(captionslib.place_words(words, layout.pieces))
+            path = self.guard.writable(first.with_name(f"{stem} - Captions.srt"))
+            path.write_text(captionslib.srt(items), encoding="utf-8")
+            out.update(captions_file=str(path), captions=len(items))
+        if layout.chapters:
+            path = self.guard.writable(first.with_name(f"{stem} - YouTube chapters.txt"))
+            path.write_text(captionslib.chapter_list(layout.chapters), encoding="utf-8")
+            out.update(chapters_file=str(path), chapters=len(layout.chapters))
+        with self._lock:
+            ep = self._load(ep_id)
+            ep["extras"] = out
+            self._save(ep)
+        return out
 
     def _encode_checked(self, mix_path: Path, dst: Path, spec: dict[str, Any], *, tags: dict[str, str],
                         layout: render.Plan, label: str, step, check) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1996,6 +2024,7 @@ class Cutzo:
             "breaks_at": show.get("breaks_at", "chapters"),
             "video_title": titles.lines_for(ep) if show.get("recipe") == "the-new-heretics" else None,
             "exports": ep.get("exports", []),
+            "extras": ep.get("extras"),
             "has_transcript": bool(self._transcript(ep["id"]).get("words")),
             "has_original": (self._ep_dir(ep["id"]) / "original.m4a").exists(),
             "audio_type": "audio/mp4" if (self._ep_dir(ep["id"]) / "preview.m4a").exists() else "audio/wav",

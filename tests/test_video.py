@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from cutzo import tools
-from cutzo.core import kit, presets, recipes, render, shows, spectrum, titles, video
+from cutzo.core import captions, kit, presets, recipes, render, shows, spectrum, titles, video
 from cutzo.core.errors import CutzoError
 
 RATE = 48000
@@ -271,6 +271,8 @@ def test_video_export_end_to_end(heretics):
     app, ep_id = heretics
     job = app.jobs.wait(app.build_episode(ep_id)["job"]["id"], 300)
     assert job["status"] == "done", job.get("error")
+    for e in app.get_episode(ep_id)["edits"]:  # keep all of the made-up talk, so the captions are easy to check
+        app.restore_cut(ep_id, e["id"])
     app.add_chapter(ep_id, 0, "Start")
     app.add_chapter(ep_id, 7.5, "A topic")
     seg = app.add_chapter(ep_id, 15.0, "Next segment", segment=True)
@@ -278,6 +280,9 @@ def test_video_export_end_to_end(heretics):
     app.add_pick(ep_id, "cold open", 10.0, 12.0)
     app.add_pick(ep_id, "sign-off", 20.0, 22.0)
     app.set_video_title(ep_id, guests="ft. Nobody")
+    # One word per burst of "talk" (2.5 s apart), so the captions can be checked against the layout.
+    words = [{"w": f"Word{k}.", "s": 2.5 * k + 0.2, "e": 2.5 * k + 1.8, "sp": None} for k in range(10)]
+    (app.library / "episodes" / ep_id / "transcript.json").write_text(json.dumps({"speakers": [], "words": words}))
     with pytest.raises(CutzoError):
         app.export(ep_id, ["youtube-4k"])
     job = app.jobs.wait(app.export(ep_id, ["youtube-1080p", "podcast-mp3"])["job"]["id"], 600)
@@ -305,3 +310,14 @@ def test_video_export_end_to_end(heretics):
     kit_dir = app.library / "kit" / "video"
     assert (kit_dir / "tnh-bg-loop-1hr-1080p.mp4").exists()  # kept for next time
     assert not (app.library / "episodes" / ep_id / "work-export").exists()
+    # Captions and the chapter list sit next to the exports, timed to the finished file.
+    extras = app.get_episode(ep_id)["extras"]
+    cues = captions.read_srt(Path(extras["captions_file"]).read_text(encoding="utf-8"))
+    teaser_at = recipes.NEW_HERETICS["teaser"]["at"]
+    assert cues[0][2] == "Word4." and cues[0][0] == pytest.approx(teaser_at + 0.2, abs=0.01)  # the teaser (10-12 s)
+    talk = [c for c in cues if c[2] == "Word0."]
+    assert talk and talk[0][0] == pytest.approx(plan_start + 0.2, abs=0.01), cues
+    assert sum(1 for c in cues if c[2] == "Word8.") == 2  # in the talk, and again in the sign-off (20-22 s)
+    chapters = Path(extras["chapters_file"]).read_text(encoding="utf-8").splitlines()
+    assert chapters[0] == "0:00 Start" and len(chapters) == 3
+    assert "Captions" in job["result"]["summary"]

@@ -402,8 +402,24 @@ export async function render(main, params, ctx) {
     }).catch(toastError);
 
     const done = (ep.exports || []).slice().reverse();
+    const reveal = (file) => api("/api/reveal", { method: "POST", body: { file } })
+      .then((r) => toast(r.shown ? "Opened the folder in File Explorer." : (r.note || "Done."), {})).catch(toastError);
     if (done.length) {
       add(exportsBox, h("h2", { class: "section-title" }, "Finished"));
+      const extras = ep.extras || {};
+      if (extras.captions_file || extras.chapters_file) {
+        const line = (label, file, what) => h("p", { class: "small", style: { wordBreak: "break-all", margin: "8px 0 0" } },
+          h("b", {}, `${label}: `), file, h("span", { class: "muted" }, ` (${what})`),
+          h("button", { class: "btn btn-quiet btn-small", style: { marginLeft: "8px" }, onclick: () => reveal(file) }, "Show in folder"));
+        add(exportsBox, h("section", { class: "panel", id: "extras" },
+          h("h3", { style: { margin: 0 } }, "Captions and chapters"),
+          h("p", { class: "small muted", style: { margin: "6px 0 0" } },
+            "Made with the exports and timed to the finished file. On YouTube, upload the captions file (with timing) and paste the chapter list into the description."),
+          extras.captions_file
+            ? line("Captions", extras.captions_file, `${extras.captions} captions`)
+            : h("p", { class: "small muted", style: { margin: "8px 0 0" } }, "No captions: this episode has no transcript yet."),
+          extras.chapters_file ? line("Chapter list", extras.chapters_file, `${extras.chapters} chapters`) : null));
+      }
       for (const x of done) {
         add(exportsBox, h("section", { class: "panel" },
           h("div", { class: "row", style: { justifyContent: "space-between" } },
@@ -411,8 +427,7 @@ export async function render(main, params, ctx) {
             h("span", { class: x.check.passed ? "tag tag-ok" : "tag tag-cut" }, x.check.passed ? "All checks passed" : "Some checks failed")),
           h("p", { class: "small", style: { wordBreak: "break-all", margin: "8px 0 4px" } }, x.file,
             x.written ? h("button", {
-              class: "btn btn-quiet btn-small", style: { marginLeft: "8px" },
-              onclick: () => api("/api/reveal", { method: "POST", body: { file: x.file } }).then((r) => toast(r.shown ? "Opened the folder in File Explorer." : (r.note || "Done."), {})).catch(toastError),
+              class: "btn btn-quiet btn-small", style: { marginLeft: "8px" }, onclick: () => reveal(x.file),
             }, "Show in folder") : null),
           h("p", { class: "small muted" }, x.written
             ? `${relTime(x.at)}. ${x.final_length} long, ${fmtSize((x.bytes || 0) / 1e9)}.`

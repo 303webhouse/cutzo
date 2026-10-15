@@ -246,6 +246,8 @@ def get_episode(
                                  [f"{r['rule']}: expected {r['expected']}, found {r['found']}"
                                   for r in x["check"]["rules"] if not r["pass"]]))}
                     for x in e["exports"]] or None,
+        "captions_file": (e.get("extras") or {}).get("captions_file"),
+        "chapter_list_file": (e.get("extras") or {}).get("chapters_file"),
         "voice_cleanup": ({"strength": e["voice_settings"]["strength"], "steps": (e.get("voice") or {}).get("steps")}
                           if e.get("voice_settings") else None),
         "dead_air": ({"silences_longer_than": e["dead_air"]["longer_than"], "shrink_to": e["dead_air"]["keep"]}
@@ -500,8 +502,10 @@ def export(
     confirm: Annotated[bool, Field(description="Set true only to replace an export that already finished (ask Nick first).")] = False,
 ) -> dict[str, Any]:
     """Render the finished files and check each against its platform's rules. Returns a job id to poll.
-    The New Heretics' 1080p video takes a while: the first time, Cutzo also makes 1080p copies of the
-    show's videos (kept for next time); a 2-hour episode then takes roughly 20-40 minutes."""
+    Every export also saves captions (.srt, from the transcript, timed to the finished file) and the
+    YouTube chapter list (.txt) next to the files. The New Heretics' 1080p video takes a while: the
+    first time, Cutzo also makes 1080p copies of the show's videos (kept for next time); a 2-hour
+    episode then takes roughly 20-40 minutes."""
     res = engine.call("POST", _ep(episode) + "/export", {"targets": targets, "confirm": confirm})
     return {"job": _job_brief(res["job"]), "files": [t["file"] for t in res["targets"]], "note": res["note"]}
 
