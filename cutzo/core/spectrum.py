@@ -6,23 +6,27 @@ it over the background in Premiere. From his template (Audio Spectrum Template.a
 as a soft line across a straight path, on both sides of it, as long as that band is loud.
 
 How long the lines are for a given sound, the colours and the timing were then matched against the
-finished JW Ghost Stories video (4 stretches of talk, 124 frames, every pixel column): a band's
-line reaches 577.6 x amplitude^0.7 pixels from the path at 1080p (amplitude 1.0 = a full-scale
-sine at that frequency; the shapes agree with 0.83 correlation), and the sound shown is centred
-97.5 ms after the frame. The colour is orange (hue 24 degrees) at both ends of the path and golden
-yellow (hue 55) in the middle, a little more orange towards the tips, and slightly see-through.
+finished JW Ghost Stories video (4 stretches of talk, 124 frames, every pixel column):
+- a band's line reaches `height` x amplitude^0.7 pixels from the path at 1080p (amplitude 1.0 = a
+  full-scale sine at that frequency); the shapes agree with 0.83 correlation;
+- the sound shown is centred 97.5 ms after the frame;
+- each column of pixels shows its tallest band, so the tops step like a bar chart;
+- the shape is a see-through fill (about 75% solid) in orange at both ends of the path (hue 30)
+  and yellow in the middle (hue 58), with a brighter, yellower rim along its edges and a bright
+  line along the path.
 That video's talk measured -16.0 LUFS, so Cutzo feeds the spectrum sound at that loudness.
 
 The 1920x1080 render sat at 100% in his 4K sequence, centred 35.7% across and 84.5% down, so in the
 finished 1080p frame the path runs from x 238.6 to 1142.6 at y 913.2.
 
-Cutzo draws only how see-through each pixel is (a grey picture per frame, sent to FFmpeg as it
-goes) and gives FFmpeg the colours once, as a still picture: the colour of a pixel depends only on
-where it is.
+Cutzo works out, for every frame, how solid each pixel of the fill and of the rim is (two grey
+pictures stacked in one, sent to FFmpeg as it goes); FFmpeg gets the two layers' colours once, as
+still pictures, since a pixel's colour depends only on where it is.
 """
 
 from __future__ import annotations
 
+import colorsys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator
@@ -37,22 +41,28 @@ TALK_LUFS = -16.0  # the talk's loudness in the video the spectrum was matched a
 
 @dataclass(frozen=True)
 class Style:
-    """The spectrum's settings at 1080p (Cutzo scales the placement for other frame sizes)."""
+    """The spectrum's settings at 1080p (Cutzo scales them for other frame sizes)."""
     start_hz: float = 20.0
     end_hz: float = 2300.0
     bands: int = 400
     window: float = 0.090  # seconds of sound behind each frame ("Audio Duration", 90 ms)
+    window_shape: str = "hann"  # "hann" or "rect"
     lead: float = 0.0975  # the sound shown is centred this long after the frame
-    height: float = 577.6  # a band's line reaches height x amplitude^power pixels from the path
+    height: float = 560.0  # a band's line reaches height x amplitude^power pixels from the path
     power: float = 0.7
     thickness: float = 3.85  # line thickness (7.7 in the half-size render)
     softness: float = 0.5
-    hue_ends: float = 24.0  # degrees: orange at both ends of the path...
-    hue_middle: float = 55.0  # ...golden yellow in the middle
-    hue_tips: float = -6.0  # a little more orange towards the ends of long lines
-    saturation: float = 0.82
-    value: float = 0.98
-    opacity: float = 0.92
+    fill_hue_ends: float = 30.0  # degrees: orange at both ends of the path...
+    fill_hue_middle: float = 58.0  # ...yellow in the middle
+    fill_saturation: float = 0.82
+    fill_opacity_ends: float = 0.70
+    fill_opacity_middle: float = 0.80
+    ripple: float = 0.15  # the fill is a little thinner between bands (fine stripes)
+    rim_hue_shift: float = 12.0  # the rim is yellower than the fill under it...
+    rim_saturation: float = 0.62  # ...and paler
+    rim_width: float = 1.1  # pixels
+    rim_opacity: float = 0.9
+    line_opacity: float = 0.9  # the bright line along the path
     x0: float = 238.6
     x1: float = 1142.6
     y: float = 913.2
@@ -78,10 +88,9 @@ class Spectrum:
         s = self.style
         k = self.frame_height / 1080.0
         self.k = k
-        r = s.thickness * k / 2  # half thickness
-        self.r = r
+        self.r = r = s.thickness * k / 2  # half thickness
         x0, x1, y = s.x0 * k, s.x1 * k, s.y * k
-        limit = s.limit * k
+        self.limit = limit = s.limit * k
         left = int(np.floor(x0 - 2 * r)) - 2
         right = int(np.ceil(x1 + 2 * r)) + 2
         top = int(np.floor(y - limit - 2 * r)) - 2
@@ -92,96 +101,102 @@ class Spectrum:
         width += width % 2
         height += height % 2
         self.box = Box(left, top, width, height)
-        self.limit = limit
-        centres = x0 + (x1 - x0) * np.arange(s.bands) / (s.bands - 1)
-        # Each pixel column is covered by the two or three nearest bands' soft lines. Sample four
-        # points across the column for how much of it each covers (1 in the core, fading to 0 at
-        # the edge: the "softness").
-        cols = left + np.arange(width)
-        sub = cols[:, None] + (np.arange(4)[None, :] + 0.5) / 4  # (width, 4)
-        nearest = np.clip(np.round((cols + 0.5 - x0) / (x1 - x0) * (s.bands - 1)).astype(int), 0, s.bands - 1)
-        idx = np.clip(nearest[:, None] + np.arange(-3, 4)[None, :], 0, s.bands - 1)  # (width, 7)
-        d = np.abs(sub[:, None, :] - centres[idx][:, :, None]) / r  # distance in half-thicknesses
-        if s.softness > 0:
-            cover = np.where(d <= 1.0 - s.softness, 1.0, np.clip((1.0 - d) / s.softness, 0.0, 1.0))
-        else:
-            cover = (d <= 1.0).astype(float)
-        w = cover.mean(axis=2)  # (width, 7): how much of the column each nearby band covers
-        dup = np.zeros_like(w, dtype=bool)  # the same band twice near the ends: count it once
-        dup[:, 1:] = idx[:, 1:] == idx[:, :-1]
-        w[dup] = 0.0
-        total = w.sum(axis=1)
-        self._idx = idx
-        self._cover = np.clip(total, 0.0, 1.0).astype(np.float32)
-        self._wn = (w / np.where(total > 0, total, 1.0)[:, None]).astype(np.float32)
-        self._place = np.clip((cols + 0.5 - x0) / (x1 - x0), 0.0, 1.0)  # 0..1 along the path
+        spacing = (x1 - x0) / (s.bands - 1)
+        cols = left + np.arange(width) + 0.5
+        place = (cols - x0) / (x1 - x0)
+        self._place = np.clip(place, 0.0, 1.0)
+        # Which bands' lines cover each pixel column: those whose centre is within the half
+        # thickness (plus half a pixel). A column shows the tallest of them.
+        nearest = np.clip(np.round(place * (s.bands - 1)).astype(int), 0, s.bands - 1)
+        self._idx = np.clip(nearest[:, None] + np.arange(-2, 3)[None, :], 0, s.bands - 1)  # (width, 5)
+        centres = x0 + self._idx * spacing
+        self._near = (np.abs(cols[:, None] - centres) <= r + 0.5).astype(np.float32)
+        self._near[(place < -0.002) | (place > 1.002)] = 0.0  # past the ends of the path: nothing
+        covered = self._near.max(axis=1) > 0
+        # Fine stripes: the fill is solid at a band's centre and thinner half-way to the next.
+        gap = np.abs(cols - (x0 + np.round(place * (s.bands - 1)) * spacing)) / (spacing / 2)
+        middle = 1.0 - np.abs(2.0 * self._place - 1.0)  # 0 at both ends of the path, 1 in the middle
+        opacity = s.fill_opacity_ends + (s.fill_opacity_middle - s.fill_opacity_ends) * middle
+        self._fill = (opacity * (1.0 - s.ripple * np.clip(gap, 0, 1) ** 2) * covered).astype(np.float32)
+        self._covered = covered
         self._rows = (top + np.arange(height) + 0.5 - y).astype(np.float32)  # distance from the path
-        # Frequency analysis: a Hann window over `window` seconds, read between FFT bins at each band.
+        # Frequency analysis: a window over `window` seconds, read between FFT bins at each band.
         self._n = int(round(s.window * self.rate))
-        self._hann = np.hanning(self._n).astype(np.float32)
+        shape = np.hanning(self._n) if s.window_shape == "hann" else np.ones(self._n)
+        self._win = shape.astype(np.float32)
         bins = np.fft.rfftfreq(self._n, 1.0 / self.rate)
         pos = np.interp(np.linspace(s.start_hz, s.end_hz, s.bands), bins, np.arange(len(bins)))
         self._lo = np.floor(pos).astype(int)
         self._frac = (pos - self._lo).astype(np.float32)
-        self._norm = 2.0 / float(self._hann.sum())
+        self._norm = 2.0 / float(self._win.sum())
+
+    # ------------------------------------------------------------------ colours
+    def _hues(self) -> np.ndarray:
+        s = self.style
+        middle = 1.0 - np.abs(2.0 * self._place - 1.0)
+        return s.fill_hue_ends + (s.fill_hue_middle - s.fill_hue_ends) * middle
+
+    def _picture(self, hues: np.ndarray, saturation: float) -> np.ndarray:
+        row = np.array([colorsys.hsv_to_rgb((h / 360.0) % 1.0, saturation, 1.0) for h in hues]) * 255.0
+        return np.repeat(np.round(row).astype(np.uint8)[None, :, :], self.box.height, axis=0)
+
+    def fill_colours(self) -> np.ndarray:
+        """The fill's colours: an RGB picture the size of the box, the same in every frame."""
+        return self._picture(self._hues(), self.style.fill_saturation)
+
+    def rim_colours(self) -> np.ndarray:
+        """The rim's colours (and the line along the path), the same in every frame."""
+        return self._picture(self._hues() + self.style.rim_hue_shift, self.style.rim_saturation)
 
     # ------------------------------------------------------------------ pictures
-    def colour_picture(self) -> np.ndarray:
-        """The colours as an RGB picture the size of the box (the same in every frame)."""
-        s = self.style
-        middle = 1.0 - np.abs(2.0 * self._place - 1.0)  # 0 at both ends of the path, 1 in the middle
-        hue = s.hue_ends + (s.hue_middle - s.hue_ends) * middle  # per column
-        reach = np.clip(np.abs(self._rows) / (30.0 * self.k), 0.0, 1.0)  # per row: towards the tips
-        h = (hue[None, :] + s.hue_tips * reach[:, None]) / 360.0 % 1.0
-        out = np.empty((self.box.height, self.box.width, 3), dtype=np.uint8)
-        # HSV -> RGB for the whole picture (numpy version of colorsys.hsv_to_rgb)
-        i = np.floor(h * 6.0).astype(int) % 6
-        f = h * 6.0 - np.floor(h * 6.0)
-        v, sat = s.value, s.saturation
-        p, q, t = v * (1 - sat), v * (1 - sat * f), v * (1 - sat * (1 - f))
-        rgb = np.select([i[..., None] == n for n in range(6)],
-                        [np.stack(c, axis=-1) for c in (
-                            (np.full_like(h, v), t, np.full_like(h, p)), (q, np.full_like(h, v), np.full_like(h, p)),
-                            (np.full_like(h, p), np.full_like(h, v), t), (np.full_like(h, p), q, np.full_like(h, v)),
-                            (t, np.full_like(h, p), np.full_like(h, v)), (np.full_like(h, v), np.full_like(h, p), q))])
-        out[:] = np.round(rgb * 255.0).clip(0, 255).astype(np.uint8)
-        return out
-
     def heights(self, windows: np.ndarray) -> np.ndarray:
         """How far each band's line reaches from the path, for a batch of sound windows
         (frames x samples, mono)."""
-        spec = np.fft.rfft(windows * self._hann[None, :], axis=1)
+        spec = np.fft.rfft(windows * self._win[None, :], axis=1)
         mag = np.abs(spec).astype(np.float32) * self._norm
         amp = mag[:, self._lo] * (1 - self._frac) + mag[:, self._lo + 1] * self._frac
         return np.minimum(self.style.height * self.k * amp ** self.style.power, self.limit)
 
-    def alpha(self, heights: np.ndarray, visible: float = 1.0) -> np.ndarray:
-        """How see-through each pixel of the box is (0-255) for one frame's band lengths. Quiet
-        bands still show as a short dot, so silence is a dotted line."""
-        out = np.zeros((self.box.height, self.box.width), dtype=np.uint8)
+    def planes(self, heights: np.ndarray, visible: float = 1.0) -> np.ndarray:
+        """How solid each pixel of the fill (top half) and of the rim (bottom half) is, 0-255, for
+        one frame's band lengths. Quiet bands still make a short dot, so silence is a line."""
+        h, w = self.box.height, self.box.width
+        out = np.zeros((2 * h, w), dtype=np.uint8)
         if visible <= 0:
             return out
-        length = np.maximum((heights[self._idx] * self._wn).sum(axis=1), self.r)  # per column
+        s = self.style
+        length = np.maximum((heights[self._idx] * self._near).max(axis=1), self.r)  # per column
+        length[~self._covered] = 0.0
         reach = float(length.max()) + 2.0
         rows = np.flatnonzero(np.abs(self._rows) <= reach)
-        if not len(rows):
-            return out
         a, b = rows[0], rows[-1] + 1
-        feather = max(self.r * self.style.softness * 2, 0.5)
         dy = np.abs(self._rows[a:b])[:, None]
-        cover = np.clip((length[None, :] - dy) / feather + 0.5, 0.0, 1.0) * self._cover[None, :]
-        out[a:b] = np.round(cover * (255.0 * self.style.opacity * min(1.0, visible))).astype(np.uint8)
+        feather = max(self.r * s.softness, 0.5)
+        inside = np.clip((length[None, :] - dy) / feather + 0.5, 0.0, 1.0)
+        fill = inside * self._fill[None, :]
+        # The rim: along the end of each column's line, and down the side of a column that sticks
+        # out past its neighbour.
+        rim_w = s.rim_width * self.k
+        edge = np.clip(1.0 - np.abs(length[None, :] - dy - rim_w / 2) / rim_w, 0.0, 1.0)
+        shorter = np.minimum(np.roll(length, 1), np.roll(length, -1))
+        side = ((dy > shorter[None, :] - rim_w / 2) & (dy <= length[None, :])).astype(np.float32) * inside
+        rim = np.maximum(edge, side) * s.rim_opacity
+        line = np.clip(1.0 - dy / (0.75 * self.k), 0.0, 1.0) * s.line_opacity * self._covered[None, :]
+        rim = np.maximum(rim, line)
+        scale = 255.0 * min(1.0, visible)
+        out[a:b] = np.round(fill * scale).astype(np.uint8)
+        out[h + a:h + b] = np.round(rim * scale).astype(np.uint8)
         return out
 
     # ------------------------------------------------------------------ frames
     def frames(self, sound: Callable[[int, int], np.ndarray], total_frames: int,
                visibility: Callable[[float], float], *, fps: float = FPS, batch: int = 128, start: int = 0,
                check: Callable[[], None] | None = None) -> Iterator[bytes]:
-        """Each frame's grey picture, in order, from frame `start` up to `total_frames`. `sound(a, b)`
-        returns mono samples a..b (zeros outside the recording); `visibility(t)` says how visible
-        the spectrum is at time t (0-1)."""
+        """Each frame's two stacked grey pictures, in order, from frame `start` up to `total_frames`.
+        `sound(a, b)` returns mono samples a..b (zeros outside the recording); `visibility(t)` says
+        how visible the spectrum is at time t (0-1)."""
         half = self._n // 2
-        blank = bytes(self.box.width * self.box.height)
+        blank = bytes(2 * self.box.width * self.box.height)
         for first in range(start, total_frames, batch):
             if check:
                 check()
@@ -197,7 +212,7 @@ class Spectrum:
             windows = np.lib.stride_tricks.sliding_window_view(chunk, self._n)[centres - half - a]
             heights = self.heights(np.asarray(windows, dtype=np.float32))
             for h, v in zip(heights, seen):
-                yield self.alpha(h, v).tobytes() if v > 0 else blank
+                yield self.planes(h, v).tobytes() if v > 0 else blank
 
 
 def mono_reader(path: Path, channels: int = 2, gain_db: float = 0.0) -> Callable[[int, int], np.ndarray]:
