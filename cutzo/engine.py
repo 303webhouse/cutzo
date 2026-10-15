@@ -105,6 +105,25 @@ class CheckBody(BaseModel):
     target: str | None = None
 
 
+class DeadAirBody(BaseModel):
+    longer_than: float | None = None
+    keep: float | None = None
+
+
+class VoiceBody(BaseModel):
+    strength: float
+
+
+class PickBody(BaseModel):
+    kind: str
+    start: TimeValue
+    end: TimeValue
+
+
+class RevealBody(BaseModel):
+    file: str
+
+
 # ------------------------------------------------------------------- app
 def _host_of(request: Request) -> str:
     raw = (request.headers.get("host") or "").strip().lower()
@@ -224,12 +243,29 @@ def create_app(cutzo: Cutzo, *, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         return cutzo.get_transcript(episode, include_cut=include_cut, fmt=format, source=source_of(request))
 
     @app.get("/api/episodes/{episode}/waveform")
-    def waveform(episode: str, buckets: int = 1200):
-        return cutzo.waveform(episode, buckets)
+    def waveform(episode: str, buckets: int = 1200, start: float | None = None, end: float | None = None):
+        return cutzo.waveform(episode, buckets, start=start, end=end)
 
     @app.get("/api/episodes/{episode}/audio")
-    def audio(episode: str):
-        return FileResponse(cutzo.preview_audio(episode), media_type="audio/wav")
+    def audio(episode: str, which: str = "cleaned"):
+        path = cutzo.preview_audio(episode, which=which)
+        return FileResponse(path, media_type="audio/mp4" if path.suffix == ".m4a" else "audio/wav")
+
+    @app.post("/api/episodes/{episode}/dead-air")
+    def dead_air(episode: str, body: DeadAirBody, request: Request):
+        return cutzo.set_dead_air(episode, body.longer_than, body.keep, source=source_of(request))
+
+    @app.post("/api/episodes/{episode}/voice")
+    def voice(episode: str, body: VoiceBody, request: Request):
+        return cutzo.set_voice(episode, body.strength, source=source_of(request))
+
+    @app.post("/api/episodes/{episode}/picks")
+    def add_pick(episode: str, body: PickBody, request: Request):
+        return cutzo.add_pick(episode, body.kind, body.start, body.end, source=source_of(request))
+
+    @app.delete("/api/episodes/{episode}/picks/{pick_id}")
+    def remove_pick(episode: str, pick_id: str, request: Request):
+        return cutzo.remove_pick(episode, pick_id, source=source_of(request))
 
     @app.post("/api/episodes/{episode}/cuts")
     def cut_section(episode: str, body: CutBody, request: Request):
@@ -271,6 +307,10 @@ def create_app(cutzo: Cutzo, *, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     @app.post("/api/check-export")
     def check_export(body: CheckBody, request: Request):
         return cutzo.check_export(body.file, body.episode, body.target, source=source_of(request))
+
+    @app.post("/api/reveal")
+    def reveal(body: RevealBody):
+        return cutzo.reveal(body.file)
 
     # ------------------------------------------------------------- jobs
     @app.get("/api/jobs")
@@ -392,7 +432,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.port or args.library:
         settings = Settings(library=Path(args.library) if args.library else settings.library,
-                            port=args.port or settings.port)
+                            port=args.port or settings.port, drive=settings.drive)
     log_path = setup_logging(settings.library)
 
     already = running_cutzo(settings)
@@ -409,10 +449,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     log.info("Starting Cutzo %s with library %s on %s", __version__, settings.library, settings.base_url)
-    cutzo = Cutzo(settings.library, speed=args.speed)
+    cutzo = Cutzo(settings.library, speed=args.speed, drive=settings.drive)
     app = create_app(cutzo)
+    # A browser tab playing audio keeps a stream open; don't let that hold up quitting.
     config = uvicorn.Config(app, host=settings.host, port=settings.port, log_config=None, access_log=False,
-                            log_level="warning")
+                            log_level="warning", timeout_graceful_shutdown=3)
     server = uvicorn.Server(config)
     app.state.server = server
     try:

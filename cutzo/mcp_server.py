@@ -32,21 +32,25 @@ INSTRUCTIONS = f"""Cutzo is Nick's own podcast and video editor, running on his 
 Shows: The Dig (audio podcast, Denver Stiffs) and The New Heretics (video podcast with a fire
 background, audio spectrum and opening montage).
 
-This is Phase {PHASE}: the episodes are SAMPLE data and the media work (sync, voice cleanup,
-transcription, rendering, export) is pretend. The editing itself is real: cuts, chapters,
-camera choices, show-kit swaps, undo, safety rules and the activity log.
+This is Phase {PHASE}. Episodes marked sample are pretend data. Real episodes (The Dig so far)
+are built for real: Cutzo lines up the recordings, cleans the voices (noise removal, de-essing,
+leveling) and finds dead air, and export writes a real MP3 checked against the podcast rules.
+Real episodes have no transcript yet (Phase 3), so work with times there; video exports are Phase 3.
 
 How to work:
-- Start with list_episodes, then get_episode or get_transcript. Episodes can be named loosely
-  ("spooky", "debrief part 2"); ids work too.
-- Times are in the ORIGINAL recording, written like 12:03 or 1:02:45.5. Read times from
-  get_transcript. Cutzo works out the finished file's times itself (see youtube_chapters).
+- Start with list_episodes, then get_episode (or get_transcript for sample episodes). Episodes can be
+  named loosely ("spooky", "debrief part 2"); ids work too.
+- Times are in the ORIGINAL recording, written like 12:03 or 1:02:45.5. Cutzo works out the finished
+  file's times itself (intro, breaks and cuts included).
+- The Dig's finished file follows Nick's own layout: a cold open of highlights, the theme and sound
+  bites, the conversation with a theme break and stinger before each new chapter, then sign-off clips.
+  add_highlight picks the cold-open and sign-off stretches; chapters mark where segments start.
 - Long jobs (import_media, build_episode, export) return a job id at once; poll job_status.
+  Building a real episode takes a few minutes.
 - Every change is logged as "Claude" and shows up live in Cutzo's window. undo_last_change
   reverses the latest change; restore_cut brings back one cut by its id.
 - Safety: Cutzo never touches original recordings; it writes only in its own folders. Very
   long cuts and replacing a finished export ask for confirm=true: check with Nick first.
-- Show notes and chapter titles: read get_transcript and write them in the chat; no paid APIs.
 - Nick doesn't code. Describe results in plain English (what changed, how long the episode is
   now), not JSON or ids, unless he asks.
 """
@@ -155,7 +159,8 @@ def _episode_brief(e: dict[str, Any]) -> dict[str, Any]:
         "stage": e["stage_label"],
         "length": e["length_text"],
         "final_length": e.get("final_text"),
-        "cuts": e["cut_count"],
+        "cuts": e["cut_count"] - e.get("pause_count", 0),
+        "pauses_shortened": e.get("pause_count") or None,
         "chapters": e["chapter_count"],
         "exports": e["export_count"],
     }
@@ -191,10 +196,18 @@ def list_episodes(show: Annotated[str | None, Field(description="Optional: 'The 
 
 
 @server.tool(annotations=READ, structured_output=False)
-def get_episode(episode: Episode) -> dict[str, Any]:
-    """Everything about one episode: recordings, stages, cuts (with ids), chapters, show-kit choices, exports."""
+def get_episode(
+    episode: Episode,
+    dead_air_details: Annotated[bool, Field(description="List every automatic dead-air cut (there can be hundreds). "
+                                                        "Leave false to get just their count.")] = False,
+) -> dict[str, Any]:
+    """Everything about one episode: recordings, stages, cuts (with ids), chapters, show-kit choices, exports.
+    Automatic dead-air cuts are summarized unless dead_air_details is true."""
     e = engine.call("GET", _ep(episode))
     out = _episode_brief(e)
+    cuts = [x for x in e["edits"] if x["type"] == "cut"]
+    auto = [x for x in cuts if x.get("reason") == "dead air" and x.get("by") == "auto"]
+    shown = cuts if dead_air_details else [x for x in cuts if x not in auto]
     out.update({
         "stages": ", ".join(f"{s['label']}: {s['status']}" for s in e["stages"]),
         "recordings": [{"name": m["name"], "kind": m.get("kind"), "person": m.get("person"),
@@ -202,7 +215,12 @@ def get_episode(episode: Episode) -> dict[str, Any]:
                        for m in e["media"]],
         "cameras": e.get("cameras") or None,
         "cuts": [{"id": x["id"], "from": x["start_text"], "to": x["end_text"], "why": x.get("reason"),
-                  "words": x.get("text"), "by": x.get("by")} for x in e["edits"] if x["type"] == "cut"],
+                  "words": x.get("text"), "by": x.get("by")} for x in shown],
+        "dead_air_cuts": ({"count": len(auto),
+                           "total_seconds": round(sum(x["end"] - x["start"] for x in auto), 1),
+                           "note": "Listed in 'cuts'." if dead_air_details else
+                           "Not listed; call get_episode with dead_air_details=true to see them."}
+                          if auto else None),
         "camera_choices": [{"id": x["id"], "from": x["start_text"], "to": x["end_text"], "angle": x.get("angle"),
                             "by": x.get("by")} for x in e["edits"] if x["type"] == "camera"] or None,
         "chapters": [{"id": c["id"], "at": c["time_text"], "title": c["title"], "in_finished_file": c["output_text"],
@@ -210,8 +228,22 @@ def get_episode(episode: Episode) -> dict[str, Any]:
         "youtube_chapters": e.get("youtube_chapters") or None,
         "chapter_warnings": e.get("chapter_warnings") or None,
         "show_kit": {s["label"]: (s["asset"] or {}).get("name") for s in e["slots"]},
-        "exports": [{"label": x["label"], "file": x["file"], "status": x["status"], "written": x.get("written")}
+        "exports": [{"label": x["label"], "file": x["file"], "status": x["status"], "written": x.get("written"),
+                     "length": x.get("final_length"),
+                     "checks": (None if (x.get("check") or {}).get("sample") else
+                                ("all passed" if x["check"]["passed"] else
+                                 [f"{r['rule']}: expected {r['expected']}, found {r['found']}"
+                                  for r in x["check"]["rules"] if not r["pass"]]))}
                     for x in e["exports"]] or None,
+        "voice_cleanup": ({"strength": e["voice_settings"]["strength"], "steps": (e.get("voice") or {}).get("steps")}
+                          if e.get("voice_settings") else None),
+        "dead_air": ({"silences_longer_than": e["dead_air"]["longer_than"], "shrink_to": e["dead_air"]["keep"]}
+                     if e.get("dead_air") else None),
+        "cold_open": [{"id": p["id"], "from": p["start_text"], "to": p["end_text"]}
+                      for p in (e.get("picks") or {}).get("cold_open", [])] or None,
+        "sign_off": [{"id": p["id"], "from": p["start_text"], "to": p["end_text"]}
+                     for p in (e.get("picks") or {}).get("outro", [])] or None,
+        "build_notes": e.get("build_notes") or None,
         "last_change": e.get("last_change"),
         "note": e.get("note"),
     })
@@ -250,7 +282,8 @@ def build_episode(
     episode: Episode,
     template: Annotated[str | None, Field(description="Optional show template to use; defaults to the episode's show.")] = None,
 ) -> dict[str, Any]:
-    """Run Sync, Podcast voice, Transcribe and Auto-edit (dead air, filler words, chapters). Returns a job id."""
+    """Build an episode: line up the recordings, clean the voices and suggest dead-air cuts (real episodes take
+    a few minutes; transcripts come in Phase 3). Sample episodes run pretend steps. Returns a job id."""
     res = engine.call("POST", _ep(episode) + "/build", {"template": template})
     return {"job": _job_brief(res["job"]), "steps": res["steps"], "note": res.get("note")}
 
@@ -270,7 +303,7 @@ def get_transcript(
     include_cut: Annotated[bool, Field(description="Also show words already cut, marked [cut: ...].")] = False,
 ) -> str:
     """The episode's transcript with [m:ss] times per paragraph (original recording time). Use it to find
-    what to cut, to place chapters, and to write show notes in the chat."""
+    what to cut, to place chapters, and to write show notes in the chat. Real episodes get transcripts in Phase 3."""
     t = engine.call("GET", _ep(episode) + "/transcript", query={"include_cut": str(include_cut).lower()})
     head = (f"{t['title']} ({t['show']}). Speakers: {', '.join(t['speakers'])}. "
             f"Recording {t['recording_length']}, finished {t['final_length']}.\n{t['note']}\n\n")
@@ -350,6 +383,50 @@ def swap_asset(
     return {"done": res["summary"]}
 
 
+@server.tool(annotations=CHANGE, structured_output=False)
+def add_highlight(
+    episode: Episode,
+    kind: Annotated[str, Field(description="'cold open' (highlights that open the episode) or 'sign-off' (clips at the very end).")],
+    start: Time, end: Time,
+) -> dict[str, Any]:
+    """Pick a stretch of the recording for the cold open or the sign-off (The Dig layout). Order = order added."""
+    res = engine.call("POST", _ep(episode) + "/picks", {"kind": kind, "start": start, "end": end})
+    return {"done": res["summary"], "id": res["pick"]["id"], "total_now": res["total"]}
+
+
+@server.tool(annotations=CHANGE, structured_output=False)
+def remove_highlight(
+    episode: Episode,
+    highlight_id: Annotated[str, Field(description="The id from get_episode's cold_open or sign_off list, like 'p4'.")],
+) -> dict[str, Any]:
+    """Take a stretch out of the cold open or sign-off."""
+    res = engine.call("DELETE", _ep(episode) + "/picks/" + urllib.parse.quote(highlight_id.strip(), safe=""))
+    return {"done": res["summary"]}
+
+
+@server.tool(annotations=CHANGE, structured_output=False)
+def set_dead_air(
+    episode: Episode,
+    longer_than: Annotated[float | None, Field(description="Silences longer than this many seconds get shortened (default 1.0).")] = None,
+    keep: Annotated[float | None, Field(description="...down to this many seconds (default 0.5). Smaller = tighter.")] = None,
+) -> dict[str, Any]:
+    """How tight the dead-air trimming is (real episodes). Re-suggests the dead-air cuts at once; cuts Nick
+    brought back stay back."""
+    res = engine.call("POST", _ep(episode) + "/dead-air", {"longer_than": longer_than, "keep": keep})
+    return {"done": res["summary"], "episode_length_now": res["final_length"]}
+
+
+@server.tool(annotations=CHANGE, structured_output=False)
+def set_voice_strength(
+    episode: Episode,
+    strength: Annotated[int, Field(description="0 = no noise removal, 100 = strongest. Both shows default to 25 (light), which Nick picked in a listening test.", ge=0, le=100)],
+) -> dict[str, Any]:
+    """How strongly this episode's voices are cleaned. Takes effect when the episode is built again
+    (build_episode)."""
+    res = engine.call("POST", _ep(episode) + "/voice", {"strength": strength})
+    return {"done": res["summary"], "rebuild_needed": res["needs_rebuild"]}
+
+
 @server.tool(annotations=READ, structured_output=False)
 def list_assets(show: Annotated[str | None, Field(description="Optional show name to filter by.")] = None) -> dict[str, Any]:
     """The show kit: backgrounds, intros, music, voiced segment titles, sounds and art, and where each is used."""
@@ -364,7 +441,8 @@ def export(
     targets: Annotated[list[str] | None, Field(description="Any of: youtube-4k, youtube-1080p, substack-video, podcast-mp3, podcast-aac. Default: the show's usual exports.")] = None,
     confirm: Annotated[bool, Field(description="Set true only to replace an export that already finished (ask Nick first).")] = False,
 ) -> dict[str, Any]:
-    """Render the finished files and check each against its platform's rules. Returns a job id to poll."""
+    """Render the finished files and check each against its platform's rules. Real episodes: audio exports
+    (podcast-mp3, podcast-aac) write real files; video arrives in Phase 3. Returns a job id to poll."""
     res = engine.call("POST", _ep(episode) + "/export", {"targets": targets, "confirm": confirm})
     return {"job": _job_brief(res["job"]), "files": [t["file"] for t in res["targets"]], "note": res["note"]}
 

@@ -3,7 +3,8 @@
   Safe to run again at any time: it repairs or updates whatever is already there.
 
   What it does:
-    1. Makes Cutzo's own Python folder (.venv) using uv, and installs Cutzo into it.
+    1. Makes Cutzo's own Python folder (.venv) using uv, installs Cutzo into it, and downloads
+       its tools (FFmpeg and DeepFilterNet, checked against their published checksums).
     2. Picks the library folder (F:\Cutzo when the F: drive exists) and saves settings.json.
     3. Adds a Cutzo shortcut to the desktop and the Start menu.
     4. Adds an on-demand task, "Cutzo Engine", so Cutzo keeps running when Claude closes.
@@ -134,6 +135,12 @@ $code = Invoke-Tool $Uv @("pip", "install", "--python", $VenvPy, "--editable", $
 if ($code -ne 0) { Stop-Setup "Installing Cutzo's parts failed. Check the internet connection and run Setup Cutzo again." }
 if (-not (Test-Path -LiteralPath $VenvPyw)) { Stop-Setup "pythonw.exe is missing from $Venv. Delete the .venv folder and run Setup Cutzo again." }
 Good "Installed."
+
+Step "Getting Cutzo's tools (FFmpeg and DeepFilterNet, about 140 MB the first time)"
+$code = Invoke-Tool $VenvPy @("-m", "cutzo.tools.install")
+if ($code -ne 0) {
+    Note "Some tools couldn't be installed. Cutzo still opens, but building real episodes needs them. Check the internet connection and run Update Cutzo again."
+}
 
 # The .venv's own pythonw.exe opens a console window with this Python build, so the shortcut
 # and the background task use the real pythonw.exe with run.pyw (which adds the .venv's packages).

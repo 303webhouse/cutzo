@@ -110,13 +110,15 @@ export async function render(main, params, ctx) {
             ep.duration
               ? [h("span", {}, "Recording ", h("b", {}, fmtDur(ep.duration))),
                  h("span", {}, "After cuts ", h("b", {}, fmtDur(ep.final_duration))),
-                 h("span", {}, plural(ep.cut_count, "cut"), ", ", plural(ep.chapter_count, "chapter"))]
+                 ep.finished_duration ? h("span", { title: "With the intro, breaks and ending" }, "Finished file ", h("b", {}, fmtDur(ep.finished_duration))) : null,
+                 h("span", {}, plural(ep.cut_count - (ep.pause_count || 0), "cut"),
+                   ep.pause_count ? `, ${plural(ep.pause_count, "pause")} shortened` : "", ", ", plural(ep.chapter_count, "chapter"))]
               : h("span", {}, plural(ep.media_count, "recording"), ", not built yet"))),
         h("div", { class: "row" }, undo)),
       h("ol", { class: "stages", "aria-label": "Steps" },
         ep.stages.map((s) => h("li", { class: s.status },
           h("span", { class: "mark", svg: s.status === "done" ? icons.check : "" }),
-          h("span", {}, s.label),
+          h("span", {}, s.label, s.status === "later" ? h("span", { class: "later-note" }, " (Phase 3)") : null),
           h("span", { class: "sr-only", style: { position: "absolute", left: "-9999px" } }, `: ${statusWord(s.status)}`)))),
       nextStep(next),
     ]);
@@ -136,9 +138,13 @@ export async function render(main, params, ctx) {
     }
     const copy = {
       "Add recordings": ["Add the raw recordings", "Paste the paths of the files, or the folder they're in."],
-      "Build episode": ["Build the episode", "Cutzo lines up the recordings, cleans the voices, writes the transcript and suggests cuts."],
-      "Build again": ["New recordings were added", "Build again to include them. Your own cuts and chapters stay."],
-      "Review cuts": ["Review the suggested cuts", "Read the transcript, bring back anything you want to keep, then export."],
+      "Build episode": ["Build the episode", ep.sample
+        ? "Cutzo lines up the recordings, cleans the voices, writes the transcript and suggests cuts."
+        : "Cutzo lines up the recordings, cleans the voices and finds dead air. A long episode takes a few minutes."],
+      "Build again": ["Build again", "New recordings or a new cleanup setting. Your own cuts, chapters and picks stay."],
+      "Review cuts": ["Review the episode", ep.has_transcript
+        ? "Read the transcript, bring back anything you want to keep, then export."
+        : "Listen through, mark chapters and the cold open, check the dead-air cuts, then export."],
       "See exports": ["Exported", "The finished files and their checks are on the Export tab."],
     }[next.label] || [next.label, ""];
     let button;
@@ -196,7 +202,9 @@ export async function render(main, params, ctx) {
       if (!built()) {
         body.append(h("div", { class: "panel" },
           h("h3", {}, "Nothing to review yet"),
-          h("p", { class: "muted" }, "Build the episode first. Cutzo then shows the transcript, the waveform and its suggested cuts here."),
+          h("p", { class: "muted" }, ep.sample
+            ? "Build the episode first. Cutzo then shows the transcript, the waveform and its suggested cuts here."
+            : "Build the episode first. Cutzo then shows the waveform, the cleaned sound and its suggested cuts here."),
           h("a", { class: "btn btn-primary", href: `#/episode/${encodeURIComponent(ep.id)}/recordings` }, "Go to recordings")));
         return;
       }
@@ -222,10 +230,13 @@ export async function render(main, params, ctx) {
           ? h("div", { class: "table-wrap" }, h("table", { class: "grid" },
               h("thead", {}, h("tr", {}, h("th", {}, "File"), h("th", {}, "Who"), h("th", {}, "What it is"), h("th", {}, "Lined up"))),
               h("tbody", {}, media.map((m) => h("tr", {},
-                h("td", { class: "name" }, m.name, h("span", { class: "sub" }, m.path)),
+                h("td", { class: "name" }, m.name, h("span", { class: "sub" }, m.path),
+                  m.probe ? h("span", { class: "sub" }, describeProbe(m.probe)) : null,
+                  m.problem ? h("span", { class: "sub check-fail" }, m.problem) : null),
                 h("td", {}, m.person || (m.source === "mix" || m.source === "streamyard-mix" ? "Everyone" : "\u2014")),
                 h("td", {}, `${m.source_label}${m.kind ? ` (${m.kind})` : ""}`),
-                h("td", {}, m.sync ? [h("b", { class: "num" }, `${m.sync.offset >= 0 ? "+" : ""}${m.sync.offset.toFixed(3)} s`), h("span", { class: "sub" }, m.sync.method)] : h("span", { class: "muted" }, "After building")))))))
+                h("td", {}, m.sync && m.sync.offset != null ? [h("b", { class: "num" }, `${m.sync.offset >= 0 ? "+" : ""}${m.sync.offset.toFixed(3)} s`), h("span", { class: "sub" }, m.sync.method)]
+                  : m.sync ? h("span", { class: "muted" }, m.sync.method) : h("span", { class: "muted" }, "After building")))))))
           : h("p", { class: "muted" }, "Add the raw files below. Cutzo reads them and never changes them."),
         ep.sample ? h("p", { class: "small muted" }, "These sample paths are examples; Cutzo doesn't look for them on disk.") : null),
       h("div", { class: "two-col" },
@@ -250,14 +261,21 @@ export async function render(main, params, ctx) {
           }, "Add recordings")),
         h("section", { class: "panel" },
           h("h3", {}, built() ? "Build again" : "Build the episode"),
-          h("p", { class: "muted" }, "Cutzo runs four steps, in order:"),
-          h("ol", { class: "steps-list" },
-            h("li", {}, h("b", {}, "Sync: "), "lines up everyone's recordings."),
-            h("li", {}, h("b", {}, "Podcast voice: "), "removes noise and room echo, evens out voices."),
-            h("li", {}, h("b", {}, "Transcribe: "), "writes down every word with its time."),
-            h("li", {}, h("b", {}, "Auto-edit: "), "suggests cuts for dead air and filler words, and chapters.")),
+          h("p", { class: "muted" }, "Cutzo runs these steps, in order:"),
+          ep.sample
+            ? h("ol", { class: "steps-list" },
+                h("li", {}, h("b", {}, "Sync: "), "lines up everyone's recordings."),
+                h("li", {}, h("b", {}, "Podcast voice: "), "removes noise and room echo, evens out voices."),
+                h("li", {}, h("b", {}, "Transcribe: "), "writes down every word with its time."),
+                h("li", {}, h("b", {}, "Auto-edit: "), "suggests cuts for dead air and filler words, and chapters."))
+            : h("ol", { class: "steps-list" },
+                h("li", {}, h("b", {}, "Sync: "), "lines up everyone's recordings (StreamYard's file names, then by sound)."),
+                h("li", {}, h("b", {}, "Podcast voice: "), "removes background noise, softens harsh S sounds, evens out voices."),
+                h("li", {}, h("b", {}, "Auto-edit: "), "finds long silences and suggests shortening them."),
+                h("li", {}, h("b", {}, "Transcribe: "), "arrives in Phase 3.")),
           built() ? h("p", { class: "small muted" }, "Building again replaces Cutzo's suggestions. Your own cuts and chapters, and Claude's, stay.") : null,
-          h("p", { class: "small muted" }, "Phase 1 pretends these steps with a short test clip."),
+          ep.sample ? h("p", { class: "small muted" }, "Sample episode: these steps are pretend and use a short test clip.") : null,
+          ep.voice_settings ? cleanupControl() : null,
           h("button", { class: "btn btn-primary", disabled: !media.length || (ep.busy || []).length > 0, onclick: build }, built() ? "Build again" : "Build episode"))),
       h("p", { class: "small muted", style: { marginTop: "8px" } },
         "Done with this episode in Cutzo? ",
@@ -308,13 +326,16 @@ export async function render(main, params, ctx) {
         h("input", {
           type: "checkbox",
           value: p.id,
-          checked: pick.has(p.id),
+          checked: pick.has(p.id) && !(p.kind === "video" && !ep.sample),
+          disabled: p.kind === "video" && !ep.sample,
           onchange: (e) => { if (e.target.checked) pick.add(p.id); else pick.delete(p.id); draft.confirm = null; },
         }),
         h("span", {},
           h("b", {}, p.label),
           h("span", { class: "small muted" }, p.summary),
-          h("span", { class: "small", style: { display: "block", marginTop: "4px" } }, `This episode: ${fmtSize((p.gb_per_hour * final) / 3600)} (sample length)`)));
+          h("span", { class: "small", style: { display: "block", marginTop: "4px" } },
+            p.kind === "video" && !ep.sample ? "Video exports arrive in Phase 3."
+              : `This episode: ${fmtSize((p.gb_per_hour * (ep.finished_duration || final)) / 3600)}${ep.sample ? " (sample length)" : ""}`)));
       const confirmBox = h("div", {});
       const showConfirm = () => {
         clear(confirmBox);
@@ -352,7 +373,9 @@ export async function render(main, params, ctx) {
         confirmBox,
         h("div", { class: "row", style: { marginTop: "16px" } },
           h("button", { class: "btn btn-primary", disabled: busy || !built(), onclick: () => go(false) }, busy ? "Exporting\u2026" : "Export"),
-          h("span", { class: "small muted" }, "Practice mode: no file is written yet. Real exports start in Phase 2."))));
+          h("span", { class: "small muted" }, ep.sample
+            ? "Sample episode: no file is written."
+            : "Writes the finished file to the exports folder in your Cutzo library, then checks it."))));
     }).catch(toastError);
 
     const done = (ep.exports || []).slice().reverse();
@@ -363,17 +386,46 @@ export async function render(main, params, ctx) {
           h("div", { class: "row", style: { justifyContent: "space-between" } },
             h("h3", { style: { margin: 0 } }, x.label),
             h("span", { class: x.check.passed ? "tag tag-ok" : "tag tag-cut" }, x.check.passed ? "All checks passed" : "Some checks failed")),
-          h("p", { class: "small", style: { wordBreak: "break-all", margin: "8px 0 4px" } }, x.file),
-          h("p", { class: "small muted" }, `${relTime(x.at)}. ${x.final_length} long, ${fmtSize(x.estimated_gb)}. ${x.written ? "" : "Not written: practice mode."}`),
+          h("p", { class: "small", style: { wordBreak: "break-all", margin: "8px 0 4px" } }, x.file,
+            x.written ? h("button", {
+              class: "btn btn-quiet btn-small", style: { marginLeft: "8px" },
+              onclick: () => api("/api/reveal", { method: "POST", body: { file: x.file } }).then((r) => toast(r.shown ? "Opened the folder in File Explorer." : (r.note || "Done."), {})).catch(toastError),
+            }, "Show in folder") : null),
+          h("p", { class: "small muted" }, x.written
+            ? `${relTime(x.at)}. ${x.final_length} long, ${fmtSize((x.bytes || 0) / 1e9)}.`
+            : `${relTime(x.at)}. ${x.final_length} long, ${fmtSize(x.estimated_gb)}. Not written: sample episode.`),
           h("div", { class: "table-wrap" }, h("table", { class: "grid" },
             h("thead", {}, h("tr", {}, h("th", {}, "Rule"), h("th", {}, "Needs"), h("th", {}, "Result"))),
             h("tbody", {}, x.check.rules.map((r) => h("tr", {},
               h("td", { class: "name" }, r.rule),
               h("td", {}, r.expected),
               h("td", { class: r.pass ? "check-pass" : "check-fail" }, r.pass ? "Pass" : "Fail", h("span", { class: "sub" }, r.found))))))),
-          h("p", { class: "small muted", style: { marginTop: "10px" } }, x.check.note)));
+          x.check.note ? h("p", { class: "small muted", style: { marginTop: "10px" } }, x.check.note) : null));
       }
     }
+  }
+
+  function describeProbe(pr) {
+    const parts = [];
+    if (pr.duration) parts.push(fmtDur(pr.duration));
+    if (pr.audio) parts.push(`${(pr.audio.codec || "").toUpperCase()} ${pr.audio.channels === 1 ? "mono" : pr.audio.channels === 2 ? "stereo" : `${pr.audio.channels} ch`}, ${Math.round((pr.audio.rate || 0) / 100) / 10} kHz`);
+    if (pr.video) parts.push(`${pr.video.width}x${pr.video.height} ${pr.video.fps || ""} fps${pr.video.variable_frame_rate ? " (variable)" : ""}`);
+    if (!pr.audio && !pr.video) parts.push("no sound or picture found");
+    return parts.join(" \u00b7 ");
+  }
+
+  function cleanupControl() {
+    const value = ep.voice_settings.strength;
+    const out = h("output", {}, String(value));
+    const slider = h("input", {
+      type: "range", min: "0", max: "100", step: "5", value: String(value), "aria-label": "Cleanup strength",
+      oninput: (e) => { out.textContent = e.target.value; },
+      onchange: (e) => act(() => api(epPath(ep.id) + "/voice", { method: "POST", body: { strength: Number(e.target.value) } }), (r) => r.summary),
+    });
+    return h("div", { class: "field", style: { marginTop: "12px" } },
+      h("span", {}, "Cleanup strength: ", out, " of 100"),
+      slider,
+      h("span", { class: "hint" }, "How far background noise is turned down. 25 is the light setting you picked in the listening test. Build again to hear a change."));
   }
 
   drawHead();

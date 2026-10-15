@@ -25,7 +25,7 @@ export function chain(stages) {
 }
 
 export function statusWord(status) {
-  return { done: "done", running: "running", ready: "ready", todo: "to do" }[status] || status;
+  return { done: "done", running: "running", ready: "ready", todo: "to do", later: "comes in Phase 3" }[status] || status;
 }
 
 export async function render(main, params, ctx) {
@@ -76,7 +76,9 @@ function row(ep, ctx) {
         ep.sample ? h("span", { class: "tag tag-sample" }, "Sample") : null,
         ep.test_episode ? h("span", { class: "tag tag-test", title: "This is one of the two episodes Cutzo rebuilds and compares with your finished version." }, "Test episode") : null,
         h("span", {}, lengths),
-        ep.duration ? h("span", {}, plural(ep.cut_count, "cut")) : null,
+        ep.duration && (ep.cut_count > (ep.pause_count || 0) || !ep.pause_count)
+          ? h("span", {}, plural(ep.cut_count - (ep.pause_count || 0), "cut")) : null,
+        ep.pause_count ? h("span", {}, `${plural(ep.pause_count, "pause")} shortened`) : null,
         ep.duration ? h("span", {}, plural(ep.chapter_count, "chapter")) : null,
         h("span", {}, `Changed ${relTime(ep.updated)}`))),
     chain(ep.stages),

@@ -35,6 +35,7 @@ class Settings:
     library: Path
     port: int = DEFAULT_PORT
     host: str = HOST
+    drive: Path | None = None  # Google Drive for desktop, where the show kit lives
 
     @property
     def base_url(self) -> str:
@@ -45,6 +46,16 @@ def default_library() -> Path:
     if os.name == "nt" and Path("F:/").exists():
         return Path("F:/Cutzo")
     return Path.home() / "Cutzo"
+
+
+def default_drive() -> Path | None:
+    """Google Drive for desktop's "My Drive" folder, if this computer has one."""
+    for candidate in (Path("G:/My Drive"), Path.home() / "Google Drive" / "My Drive", Path.home() / "My Drive"):
+        if os.name != "nt" and str(candidate).startswith("G:"):
+            continue
+        if candidate.is_dir():
+            return candidate
+    return None
 
 
 def read_settings_file(path: Path | None = None) -> dict:
@@ -73,4 +84,6 @@ def load_settings() -> Settings:
             raise ValueError
     except (TypeError, ValueError):
         raise SettingsError(f"The port in settings.json must be a number from 1024 to 65535, not {port_text!r}.") from None
-    return Settings(library=Path(str(library)).expanduser(), port=port)
+    drive = os.environ.get("CUTZO_DRIVE") or data.get("drive_folder")
+    return Settings(library=Path(str(library)).expanduser(), port=port,
+                    drive=Path(str(drive)).expanduser() if drive else default_drive())

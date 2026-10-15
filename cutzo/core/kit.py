@@ -8,6 +8,7 @@ Inventory taken from Drive on Oct 13, 2026.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 TNH = "The New Heretics"
@@ -81,13 +82,19 @@ ASSETS: list[dict[str, Any]] = [
        "project", "Reference only", "1jYsIvroD-lVp6JfIFBzaJluWuPgRWNwP",
        "Your Premiere voice settings; Cutzo's Podcast voice starts from these."),
     # --- The Dig ---------------------------------------------------------
+    _a("dig-theme", "the-dig", "Out of Flux - DABOOMJIGGLE.mp3", DIG, "audio", "Theme music",
+       note="Opens and closes each episode and plays between segments."),
+    _a("dig-montage", "the-dig", "Sound-bite montage", "Built into Cutzo", "style", "Intro sound bites",
+       note="The bites from Not meant for this game, Doug Moe Greatness, Take that L and The Dig Intro Audio, "
+            "timed as in Season Debrief Part 2."),
     _a("dig-intro-gabe", "the-dig", "Gabe Audio.mp3", f"{DIG}/Intro", "audio", "Intro clip"),
     _a("dig-intro-doug-moe", "the-dig", "Doug Moe Greatness.wav", f"{DIG}/Intro", "audio", "Intro clip"),
     _a("dig-intro-take-that-l", "the-dig", "Take that l on the way out.wav", f"{DIG}/Intro", "audio", "Intro clip"),
     _a("dig-intro-not-meant", "the-dig", "Not meant for this game.wav", f"{DIG}/Intro", "audio", "Intro clip"),
+    _a("dig-intro-audio", "the-dig", "The Dig Intro Audio.wav", f"{DIG}/Old Files", "audio", "Intro clip"),
     _a("dig-sfx-three-digs", "the-dig", "Three Digs.wav", f"{DIG}/Sound Effects", "audio", "Sound effect"),
     _a("dig-sfx-twolves-win", "the-dig", "Twolves Win.wav", f"{DIG}/Sound Effects", "audio", "Sound effect"),
-    _a("dig-sfx-national-anthem", "the-dig", "National Anthem.wav", f"{DIG}/Sound Effects", "audio", "Sound effect"),
+    _a("dig-sfx-national-anthem", "the-dig", "National Anthem .wav", f"{DIG}/Sound Effects", "audio", "Sound effect"),
     _a("dig-sfx-tom-haiku-intro", "the-dig", "Tom Haiku Intro.wav", f"{DIG}/Sound Effects", "audio", "Sound effect"),
     _a("dig-sfx-mining-chops", "the-dig", "Mining Chops.wav", f"{DIG}/Sound Effects", "audio", "Sound effect"),
     _a("dig-sfx-untitled", "the-dig", "untitled.wav", f"{DIG}/Sound Effects", "audio", "Sound effect"),
@@ -127,3 +134,46 @@ def drive_url(asset: dict[str, Any]) -> str | None:
     if not asset.get("drive_id"):
         return None
     return f"https://drive.google.com/file/d/{asset['drive_id']}/view"
+
+
+def source_path(asset: dict[str, Any], drive: Path | None) -> Path | None:
+    """Where the asset's file is on this computer (Google Drive for desktop), if it has a file."""
+    if not drive or asset.get("location") != "drive" or asset.get("kind") not in ("audio", "video", "image"):
+        return None
+    return Path(drive).joinpath(*asset["folder"].split("/"), asset["name"])
+
+
+def local_copy(asset_id: str, *, kit_dir: Path, drive: Path | None, check=None) -> Path:
+    """The asset's sound as a stereo working file in Cutzo's kit folder.
+
+    Made the first time a render needs it, and again whenever the file in Drive changes, so
+    renders never wait on Drive syncing."""
+    from ..tools import ffmpeg  # here, so listing the kit never needs FFmpeg
+    from .errors import CutzoError, NotFound
+    from .storage import read_json, write_json
+
+    asset = get_asset(asset_id)
+    if not asset:
+        raise NotFound(f"The show kit has no item called {asset_id!r}.")
+    src = source_path(asset, drive)
+    if src is None:
+        raise CutzoError(f"{asset['name']} isn't a sound file Cutzo can use.")
+    copy, info_path = kit_dir / f"{asset_id}.f32", kit_dir / f"{asset_id}.json"
+    try:
+        stat = src.stat()
+    except OSError:
+        if copy.exists():
+            return copy  # Drive is offline: the copy from last time still works
+        raise NotFound(f"Can't find {asset['name']} in Google Drive ({src}).",
+                       hint="Check that Google Drive is running and the file is still in that folder.") from None
+    info = read_json(info_path)
+    fresh = isinstance(info, dict) and info.get("size") == stat.st_size and info.get("mtime") == int(stat.st_mtime)
+    if copy.exists() and fresh:
+        return copy
+    kit_dir.mkdir(parents=True, exist_ok=True)
+    tmp = kit_dir / f"{asset_id}.part.f32"
+    ffmpeg.decode(src, tmp, channels=2, check=check)
+    tmp.replace(copy)
+    write_json(info_path, {"source": str(src), "size": stat.st_size, "mtime": int(stat.st_mtime),
+                           "channels": 2, "rate": 48000})
+    return copy

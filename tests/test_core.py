@@ -227,10 +227,10 @@ def test_same_title_exports_get_their_own_file(cutzo):
     twin = cutzo.create_episode(show="heretics", title="Spooky Sode (JW Ghost Stories)")["episode"]["id"]
     first = cutzo.export(SPOOKY, ["mp3"])
     cutzo.jobs.wait(first["job"]["id"])
-    # The twin isn't built, so give it the sample build first.
-    cutzo._load(twin)
+    # The twin isn't built, so give it the (pretend) sample build first.
     ep = cutzo._load(twin)
     ep["media"] = cutzo._load(SPOOKY)["media"]
+    ep["sample"] = True
     cutzo._save(ep)
     cutzo.jobs.wait(cutzo.build_episode(twin)["job"]["id"])
     second = cutzo.export(twin, ["mp3"])
