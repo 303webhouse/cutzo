@@ -147,7 +147,7 @@ export async function render(main, params, ctx) {
       "Review cuts": ["Review the episode", ep.has_transcript
         ? "Read the transcript and select words to cut them, mark chapters and the cold open, then export."
         : ep.sample ? "Listen through, mark chapters and the cold open, check the dead-air cuts, then export."
-          : "No transcript yet. Transcribe it (about 4 minutes) to cut by words, or listen through and cut by time."],
+          : "No transcript yet. Transcribe it (about 2 minutes) to cut by words, or listen through and cut by time."],
       "See exports": ["Exported", "The finished files and their checks are on the Export tab."],
     }[next.label] || [next.label, ""];
     let button;
@@ -291,7 +291,7 @@ export async function render(main, params, ctx) {
           h("div", { class: "row" },
             h("button", { class: "btn btn-primary", disabled: !media.length || (ep.busy || []).length > 0, onclick: build }, built() ? "Build again" : "Build episode"),
             needsTranscript() ? h("button", { class: "btn", disabled: (ep.busy || []).length > 0, onclick: transcribe }, "Just transcribe") : null),
-          needsTranscript() ? h("p", { class: "small muted" }, "Built before speech to text was installed? Just transcribe: about 4 minutes, nothing else changes.") : null)),
+          needsTranscript() ? h("p", { class: "small muted" }, "Built before speech to text was installed? Just transcribe: about 2 minutes, nothing else changes.") : null)),
       h("p", { class: "small muted", style: { marginTop: "8px" } },
         "Done with this episode in Cutzo? ",
         h("button", { class: "btn btn-quiet btn-small", onclick: removeEpisode }, "Remove it from Cutzo"),

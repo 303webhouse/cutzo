@@ -2,8 +2,9 @@
 
     FFmpeg        decoding, filters, loudness, encoding      (cutzo.tools.ffmpeg)
     DeepFilterNet noise removal for voices                   (cutzo.tools.deepfilter)
-    whisper.cpp   speech to text, on the graphics card       (cutzo.tools.whisper)
-                  plus its speech model (a data file)
+    whisper.cpp   its parakeet-cli runs speech to text on    (cutzo.tools.parakeet)
+                  the graphics card, with NVIDIA's Parakeet
+                  speech model (a data file)
 
 Setup downloads them into <app>/tools/<name>-<version>/ and checks each download
 against the SHA-256 recorded here (see install.py). Anywhere else (tests, Linux)
@@ -92,13 +93,14 @@ DEEPFILTER = Tool(
     homepage="https://github.com/Rikorose/DeepFilterNet",
 )
 
-# whisper.cpp 1.9.5 (release b5454). Windows: the CUDA 12.4 build, which carries its own cuBLAS
-# (the CUDA 11.8 build doesn't, so it can't find the graphics card). Linux: a CPU build for tests.
+# whisper.cpp 1.9.5 (release b5454), for its parakeet-cli. Windows: the CUDA 12.4 build, which
+# carries its own cuBLAS (the CUDA 11.8 build doesn't, so it can't find the graphics card).
+# Linux: a CPU build for tests.
 WHISPER = Tool(
     name="whisper",
     label="Speech to text (whisper.cpp)",
     version="1.9.5",
-    programs={"whisper-cli": "whisper-cli"},
+    programs={"parakeet-cli": "parakeet-cli"},
     downloads={
         "windows-x86_64": Download(
             url="https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-win-cuda-12.4.0-x64.zip",
@@ -119,29 +121,33 @@ WHISPER = Tool(
     homepage="https://github.com/ggml-org/whisper.cpp",
 )
 
-# OpenAI's Whisper large-v3 turbo in whisper.cpp's format, pinned to one revision of the
-# ggerganov/whisper.cpp model repository on Hugging Face (1.6 GB).
-WHISPER_MODEL = Tool(
-    name="whisper-model",
-    label="Speech model (Whisper large-v3 turbo)",
-    version="large-v3-turbo",
+# NVIDIA's Parakeet TDT 0.6B v3 in whisper.cpp's format (16-bit, 1.3 GB), pinned to one revision
+# of the ggml-org/parakeet-GGUF repository on Hugging Face. The 8-bit file is half the size but
+# ran three times slower on Nick's graphics card.
+PARAKEET_MODEL = Tool(
+    name="parakeet-model",
+    label="Speech model (Parakeet TDT 0.6B v3)",
+    version="tdt-0.6b-v3",
     programs={},
-    files={"whisper-model": "ggml-large-v3-turbo.bin"},
+    files={"parakeet-model": "ggml-parakeet-tdt-0.6b-v3-f16.bin"},
     downloads={
         "windows-x86_64": Download(
-            url="https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/"
-                "ggml-large-v3-turbo.bin",
-            sha256="1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
-            size=1624555275,
+            url="https://huggingface.co/ggml-org/parakeet-GGUF/resolve/35156454d1a39de06863303dd209fd2bed6ee079/"
+                "ggml-parakeet-tdt-0.6b-v3-f16.bin",
+            sha256="833bffc9513b2cae867ee9e51633cfd11e4d51aaa5597c8ac02159385a2b426f",
+            size=1255897319,
             kind="file",
         ),
     },
-    license="MIT (OpenAI Whisper weights)",
-    homepage="https://huggingface.co/ggerganov/whisper.cpp",
-    env="CUTZO_WHISPER_MODEL",
+    license="CC-BY-4.0 (NVIDIA parakeet-tdt-0.6b-v3 weights)",
+    homepage="https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
+    env="CUTZO_PARAKEET_MODEL",
 )
 
-TOOLS = {t.name: t for t in (FFMPEG, DEEPFILTER, WHISPER, WHISPER_MODEL)}
+# Tools Cutzo used to install and no longer needs; setup deletes Cutzo's own copies of them.
+RETIRED = ("whisper-model",)  # Whisper large-v3 turbo (1.6 GB), replaced by Parakeet on Oct 15, 2026
+
+TOOLS = {t.name: t for t in (FFMPEG, DEEPFILTER, WHISPER, PARAKEET_MODEL)}
 _OWNER = {program: tool for tool in TOOLS.values() for program in tool.programs}
 _FILE_OWNER = {name: tool for tool in TOOLS.values() for name in tool.files}
 

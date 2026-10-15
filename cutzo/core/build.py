@@ -21,7 +21,7 @@ from typing import Any, Callable
 import numpy as np
 
 from .. import tools
-from ..tools import ffmpeg, whisper
+from ..tools import ffmpeg, parakeet
 from . import audio
 from .errors import CutzoError
 from .voice import VoiceSettings, clean
@@ -242,8 +242,8 @@ def transcribe(voice_path: Path, work: Path, sources: list[Source] | None = None
     ffmpeg.run([*ffmpeg.raw_input_args(voice_path, 1), "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-f", "wav",
                 str(wav)], duration=total, check=check, progress=lambda p: report(0.04 * p, "Getting the audio ready"))
     try:
-        result = whisper.transcribe(wav, work_dir=work, check=check,
-                                    progress=lambda p: report(0.04 + 0.92 * p, "Writing down every word"))
+        result = parakeet.transcribe(wav, work_dir=work, check=check,
+                                     progress=lambda p: report(0.04 + 0.92 * p, "Writing down every word"))
     finally:
         wav.unlink(missing_ok=True)
     words = result["words"]
@@ -253,7 +253,7 @@ def transcribe(voice_path: Path, work: Path, sources: list[Source] | None = None
         report(0.97, "Working out who said what")
         speakers = [{"id": f"S{k + 1}", "name": s.person or s.name} for k, s in enumerate(people)]
         attribute_speakers(words, people, [sp["id"] for sp in speakers])
-    return {"engine": f"whisper.cpp {tools.WHISPER.version}", "model": tools.WHISPER_MODEL.version,
+    return {"engine": f"parakeet-cli (whisper.cpp {tools.WHISPER.version})", "model": f"parakeet-{tools.PARAKEET_MODEL.version}",
             "speakers": speakers, "words": words}
 
 

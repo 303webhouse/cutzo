@@ -286,8 +286,9 @@ def build_episode(
     episode: Episode,
     template: Annotated[str | None, Field(description="Optional show template to use; defaults to the episode's show.")] = None,
 ) -> dict[str, Any]:
-    """Build an episode: line up the recordings, clean the voices and suggest dead-air cuts (real episodes take
-    a few minutes; transcripts come in Phase 3). Sample episodes run pretend steps. Returns a job id."""
+    """Build an episode: line up the recordings, clean the voices, write down every word and suggest
+    dead-air cuts (a 90-minute episode takes about 15 minutes). Sample episodes run pretend steps.
+    Returns a job id."""
     res = engine.call("POST", _ep(episode) + "/build", {"template": template})
     return {"job": _job_brief(res["job"]), "steps": res["steps"], "note": res.get("note")}
 
@@ -327,8 +328,8 @@ def get_transcript(
 @server.tool(annotations=CHANGE, structured_output=False)
 def transcribe_episode(episode: Episode) -> dict[str, Any]:
     """Write down every word of a built episode with its time (speech to text on Nick's graphics card,
-    about 4 minutes for 90 minutes). Building does this too; use this for episodes built before, or
-    after a rebuild. Returns a job id to poll with job_status."""
+    about 2 minutes for 90 minutes; "um"s and "uh"s included). Building does this too; use this for
+    episodes built before, or after a rebuild. Returns a job id to poll with job_status."""
     res = engine.call("POST", _ep(episode) + "/transcribe", {})
     return {"job": _job_brief(res["job"]), "note": res.get("note")}
 

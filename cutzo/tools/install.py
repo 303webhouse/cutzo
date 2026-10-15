@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from . import TOOLS, Tool, installed_file, installed_path, platform_key, tools_dir
+from . import RETIRED, TOOLS, Tool, installed_file, installed_path, platform_key, tools_dir
 
 MARKER = ".cutzo-tool.json"
 CHUNK = 1 << 20
@@ -192,6 +192,26 @@ def remove_old_versions(tool: Tool) -> list[str]:
     return removed
 
 
+def remove_retired() -> list[str]:
+    """Delete Cutzo's own copies of tools it no longer uses (see RETIRED), to give the space back."""
+    removed = []
+    root = tools_dir()
+    if not root.is_dir():
+        return removed
+    for folder in root.iterdir():
+        marker = folder / MARKER
+        if not folder.is_dir() or not marker.is_file():
+            continue
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if data.get("tool") in RETIRED:
+            shutil.rmtree(folder, ignore_errors=True)
+            removed.append(folder.name)
+    return removed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m cutzo.tools.install", description=__doc__)
     parser.add_argument("--check", action="store_true", help="only report, don't download")
@@ -225,6 +245,10 @@ def main(argv: list[str] | None = None) -> int:
             continue
         old = remove_old_versions(tool)
         print(f"   {tool.label} {tool.version} is ready." + (f" Removed {', '.join(old)}." if old else ""), flush=True)
+    if not args.check and not args.only:
+        gone = remove_retired()
+        if gone:
+            print(f"   Removed tools Cutzo no longer uses: {', '.join(gone)}.", flush=True)
     return 1 if problems else 0
 
 

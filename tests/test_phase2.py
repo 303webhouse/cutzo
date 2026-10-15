@@ -60,11 +60,12 @@ def test_modules_import_on_their_own():
 def test_tool_registry_and_status():
     assert tools.platform_key().count("-") == 1
     names = {t["tool"] for t in tools.status()}
-    assert names == {"ffmpeg", "deep-filter", "whisper", "whisper-model"}
+    assert names == {"ffmpeg", "deep-filter", "whisper", "parakeet-model"}
+    assert not set(tools.RETIRED) & names
     for tool in tools.TOOLS.values():
         for d in tool.downloads.values():
             assert len(d.sha256) == 64 and d.size > 0
-            assert d.url.startswith(("https://github.com/", "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861"))
+            assert d.url.startswith(("https://github.com/", "https://huggingface.co/ggml-org/parakeet-GGUF/resolve/3515645"))
             assert d.kind in ("zip", "tar.gz", "exe", "file")
     with pytest.raises(KeyError):
         tools.find("photoshop")
@@ -72,15 +73,15 @@ def test_tool_registry_and_status():
 
 def test_speech_model_can_come_from_an_environment_variable(monkeypatch, tmp_path):
     monkeypatch.setenv("CUTZO_TOOLS", str(tmp_path / "tools"))
-    monkeypatch.delenv("CUTZO_WHISPER_MODEL", raising=False)
-    assert tools.find_file("whisper-model") is None
+    monkeypatch.delenv("CUTZO_PARAKEET_MODEL", raising=False)
+    assert tools.find_file("parakeet-model") is None
     with pytest.raises(CutzoError) as err:
-        tools.require_file("whisper-model")
+        tools.require_file("parakeet-model")
     assert "Update Cutzo" in (err.value.hint or "")
     model = tmp_path / "model.bin"
     model.write_bytes(b"x")
-    monkeypatch.setenv("CUTZO_WHISPER_MODEL", str(model))
-    assert tools.find_file("whisper-model") == model and tools.available("whisper-model")
+    monkeypatch.setenv("CUTZO_PARAKEET_MODEL", str(model))
+    assert tools.find_file("parakeet-model") == model and tools.available("parakeet-model")
 
 
 def test_require_explains_how_to_install(monkeypatch, tmp_path):

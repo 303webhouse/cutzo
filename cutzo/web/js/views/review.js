@@ -269,7 +269,7 @@ export function mountReview(container, initialEp, ctx) {
         h("button", { class: "btn btn-small", type: "submit" }, "Apply")),
       h("p", { class: "small muted" }, "Smaller numbers make the conversation tighter. Cuts you brought back stay back."),
       ep.has_transcript ? null : h("p", { class: "script-tip" },
-        "No transcript yet: use Transcribe at the top (about 4 minutes) to cut by words. Meanwhile, find moments with the ",
+        "No transcript yet: use Transcribe at the top (about 2 minutes) to cut by words. Meanwhile, find moments with the ",
         `waveform; the close-up under it shows ${zoom.span} seconds around the playhead for precise selections. Keys: Space `,
         "plays or pauses, the arrow keys move a second (Shift for five), Ctrl+Z undoes the last change."),
     ]);

@@ -537,8 +537,8 @@ class Cutzo:
         settings = VoiceSettings.from_dict(self._voice_settings(ep, show))
         ep_dir = self._ep_dir(ep_id)
         work = self.guard.writable(ep_dir / "work")
-        transcribe = toolbox.available("whisper-cli", "whisper-model")
-        share = ({"sync": (0.0, 0.08), "voice": (0.08, 0.58), "transcribe": (0.66, 0.28), "auto_edit": (0.94, 0.06)}
+        transcribe = toolbox.available("parakeet-cli", "parakeet-model")
+        share = ({"sync": (0.0, 0.08), "voice": (0.08, 0.72), "transcribe": (0.80, 0.14), "auto_edit": (0.94, 0.06)}
                  if transcribe else {"sync": (0.0, 0.12), "voice": (0.12, 0.82), "auto_edit": (0.94, 0.06)})
 
         def reporter(key: str, label: str):
@@ -645,14 +645,14 @@ class Cutzo:
         if not (self._ep_dir(ep_id) / "voice.f32").exists() or not ep.get("duration"):
             raise CutzoError("Build the episode first; the transcript is made from its cleaned voices.")
         toolbox.require("ffmpeg")
-        toolbox.require("whisper-cli")
-        toolbox.require_file("whisper-model")
+        toolbox.require("parakeet-cli")
+        toolbox.require_file("parakeet-model")
         with self._lock:
             self._refuse_if_busy(ep_id, "transcribe")
             job = self.jobs.submit(kind="transcribe", title=f"Transcribe {ep['title']}", episode=ep_id, source=source,
                                    steps=["Transcribe"], work=self._transcribe_work(ep_id))
         self._log(source, "transcribe", f"Started transcribing \u201c{ep['title']}\u201d", ep_id, details={"job": job["id"]})
-        return {"job": job, "note": "Writes down every word with its time; about 4 minutes for a 90-minute episode."}
+        return {"job": job, "note": "Writes down every word with its time; about 2 minutes for a 90-minute episode."}
 
     def _transcribe_work(self, ep_id: str):
         def work(ctx: JobContext) -> dict[str, Any]:

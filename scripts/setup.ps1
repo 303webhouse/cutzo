@@ -136,7 +136,7 @@ if ($code -ne 0) { Stop-Setup "Installing Cutzo's parts failed. Check the intern
 if (-not (Test-Path -LiteralPath $VenvPyw)) { Stop-Setup "pythonw.exe is missing from $Venv. Delete the .venv folder and run Setup Cutzo again." }
 Good "Installed."
 
-Step "Getting Cutzo's tools (FFmpeg, DeepFilterNet and speech to text: about 2.5 GB the first time)"
+Step "Getting Cutzo's tools (FFmpeg, DeepFilterNet and speech to text: about 2 GB the first time)"
 $code = Invoke-Tool $VenvPy @("-m", "cutzo.tools.install")
 if ($code -ne 0) {
     Note "Some tools couldn't be installed. Cutzo still opens, but building real episodes needs them. Check the internet connection and run Update Cutzo again."
