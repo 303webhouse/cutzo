@@ -252,8 +252,6 @@ def video_copy(asset_id: str, *, kit_dir: Path, drive: Path | None, until: float
     """A 1080p, 29.97 fps copy of a kit video (no sound), so making an episode's video never has to
     decode Nick's 4K files. Made the first time it's needed (covering at least `until` seconds from
     the start, or the whole file), and again when the file in Drive changes."""
-    import os
-
     from ..tools import ffmpeg
     from .errors import CutzoError, NotFound
     from .storage import read_json, write_json
@@ -285,8 +283,10 @@ def video_copy(asset_id: str, *, kit_dir: Path, drive: Path | None, until: float
     out_dir.mkdir(parents=True, exist_ok=True)
     tmp = out_dir / f"{asset_id}-1080p.part.mp4"
     w, h = VIDEO_SIZE
-    args = ["-hwaccel", "auto"] if os.name == "nt" else []
-    args += ["-i", str(src)]
+    # Decoded on the processor: on Nick's PC (Ryzen 9 3900X, RTX 2070 SUPER) "-hwaccel auto" made the
+    # 4K background copy twice as slow, because every 4K frame then has to come back from the
+    # graphics card (measured Oct 15, 2026: 20 s of BG Loop in 5.1 s on the processor, 10.4 s with it).
+    args = ["-i", str(src)]
     if not whole:
         args += ["-t", f"{span:.3f}"]
     args += ["-an", "-sn", "-dn", "-vf", f"scale={w}:{h}:flags=lanczos,fps=30000/1001,format=yuv420p,setsar=1",
