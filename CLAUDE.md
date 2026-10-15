@@ -80,17 +80,26 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
     `render.Plan.picture` (layers bottom to top, spectrum windows) besides the sound.
     `core/video.py` composes it in one FFmpeg pass over a black canvas, layers placed with
     `setpts` and `overlay=eof_action=pass` (long fading layers split so only fades blend), the
-    spectrum fed through stdin (`ffmpeg.run(feed=...)`), the sound encoded and checked first
-    (`_encode_checked`) and copied in. NVENC if the driver allows (Nick's 572 is too old for
-    FFmpeg 9's NVENC: needs 610+), else libx264 `faster`.
+    spectrum fed through stdin (`ffmpeg.run(feed=...)`), still pictures (title, spectrum colours)
+    converted once and held with the `loop` filter (`LOOP_STILLS`). The picture is drawn without
+    sound while a thread encodes and checks the sound (AAC at 384 kbps runs at only ~9x real time
+    on one core), then `video.mux` puts them together. NVENC if the driver allows (Nick's 572 is
+    too old for FFmpeg 9's NVENC: needs 610+), else libx264 `faster` (~58 fps at 1080p on Nick's
+    Ryzen 9 3900X: a 2-hour episode's picture takes about an hour).
+  - `render.encode` measures gain + limiter (a quick ebur128 pass, no encoding) and corrects the
+    gain before encoding, so one encode lands on the target loudness.
   - `core/spectrum.py` After Effects' Audio Spectrum (settings from Nick's .aep), fitted to the
     finished JW Ghost Stories frames: per frame a fill and a rim alpha (stacked grey picture),
     colours as two still PNGs. `core/titles.py` the episode title graphic (Montserrat ExtraBold +
     SemiBold, bundled in `cutzo/assets/fonts` with the OFL licence), lines from
     `ep["video_title"]` or the episode title split at its colon.
   - `kit.video_copy` makes 1080p 29.97 fps x264 copies of kit videos once (`<library>/kit/video`),
-    covering only what episodes use (the Music Loop is 64 min; only the start is needed).
-    Kit entries carry `seconds` so layouts work without the files.
+    covering only what episodes use (the Music Loop is 64 min; only the start is needed), decoded
+    on the processor (`-hwaccel auto` was twice as slow on Nick's PC). BG Loop's 71 min of 4K take
+    about 20 minutes, once. Kit entries carry `seconds` so layouts work without the files.
+  - `core/captions.py` (step 4): every real export also writes `<title> - Captions.srt` and
+    `<title> - YouTube chapters.txt` next to the files (`ep["extras"]`). Words are placed by the
+    plan's voice pieces, grouped 2 x 42 characters, 7 s at most, "um"/"uh" left out.
 - Episode folders hold `voice.f32` (cleaned talk, recording time), `original.f32`, the two
   previews, `transcript.json` and `waveform-*.json` caches. Exports render `mix.f32` then delete it
   (video exports also use `work-export/`, deleted after).
