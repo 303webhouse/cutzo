@@ -219,6 +219,15 @@ def test_an_um_that_starts_a_run_of_talk_is_taken_out(tmp_path):
     assert uh_end - 0.01 <= b <= state_start + 0.01, b  # in the dip between "uh" and "state"
 
 
+def test_a_cut_edge_in_a_pause_goes_to_the_middle_of_the_whole_pause():
+    # 10 ms steps: a pause with a faint tick just over the quiet level (-43.2 vs -43.3), then a
+    # breath (-33 dB) that really does split the pause. Real numbers from Season Debrief, 10:23.
+    env = np.array([-55.0] * 15 + [-33.0] * 4 + [-58.0] * 18 + [-43.2] + [-62.0] * 8 + [-14.0] * 5)
+    cost = env.copy()
+    k = 40  # the quietest moment, just before the talk
+    assert cutpoints._middle(cost, env, -43.3, k) == (19 + 45) // 2  # middle of 0.19-0.46 s, tick included
+
+
 def test_words_are_judged_cut_by_their_sound_not_their_stretched_times():
     """Speech to text often stretches the last word before a pause into the pause, or puts a short
     word wholly inside it. Shortening that pause mustn't strike those words through."""

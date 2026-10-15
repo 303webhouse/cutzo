@@ -33,6 +33,7 @@ NEED_MIN, NEED_MAX = 0.05, 0.25  # ...but at least 50 ms and at most 250 ms of i
 NEAR = 0.15  # ...counting only sound within this many seconds of the cut words
 LONG = 3.0  # cut words longer than this: choose the two edges separately (no need to check)
 CONTEXT = 15.0  # seconds of sound either side used to judge what counts as quiet here
+SLACK = 3.0  # dB over the quiet level that still counts as part of a pause (a faint tick or breath)
 LEAD = 0.6  # at the very start or end of the transcript, how far past the word to look
 
 
@@ -75,8 +76,9 @@ def _cost(env: np.ndarray, t: np.ndarray, gap: tuple[float, float]) -> np.ndarra
 
 def _middle(cost: np.ndarray, env: np.ndarray, quiet: float, k: int) -> int:
     """The middle of the run of moments around k that are as good as k: all of the silence k is
-    in (anything under the `quiet` level counts the same), or else what is within 0.5 dB of k."""
-    ok = (env < quiet) & np.isfinite(cost) if env[k] < quiet else np.abs(cost - cost[k]) <= 0.5
+    in (anything under the `quiet` level counts the same, and a tick SLACK dB above it doesn't
+    break the silence), or else what is within 0.5 dB of k."""
+    ok = (env < quiet + SLACK) & np.isfinite(cost) if env[k] < quiet else np.abs(cost - cost[k]) <= 0.5
     a = k
     while a > 0 and ok[a - 1]:
         a -= 1
