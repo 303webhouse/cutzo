@@ -175,13 +175,14 @@ class Spectrum:
 
     # ------------------------------------------------------------------ frames
     def frames(self, sound: Callable[[int, int], np.ndarray], total_frames: int,
-               visibility: Callable[[float], float], *, fps: float = FPS, batch: int = 128,
+               visibility: Callable[[float], float], *, fps: float = FPS, batch: int = 128, start: int = 0,
                check: Callable[[], None] | None = None) -> Iterator[bytes]:
-        """Every frame's grey picture, in order. `sound(a, b)` returns mono samples a..b (zeros
-        outside the recording); `visibility(t)` says how visible the spectrum is at time t (0-1)."""
+        """Each frame's grey picture, in order, from frame `start` up to `total_frames`. `sound(a, b)`
+        returns mono samples a..b (zeros outside the recording); `visibility(t)` says how visible
+        the spectrum is at time t (0-1)."""
         half = self._n // 2
         blank = bytes(self.box.width * self.box.height)
-        for first in range(0, total_frames, batch):
+        for first in range(start, total_frames, batch):
             if check:
                 check()
             ks = np.arange(first, min(total_frames, first + batch))
