@@ -25,7 +25,8 @@ from typing import Any, Iterable
 from .. import PHASE, __version__
 from .. import tools as toolbox
 from ..tools import ffmpeg
-from . import audio, cutpoints, kit, presets, recipes, render, sample, timeline
+from . import audio, cutpoints, kit, presets, recipes, render, sample, timeline, titles
+from . import video as videolib
 from . import build as buildlib
 from . import shows as showlib
 from . import transcript as tx
@@ -69,7 +70,7 @@ REAL_NOTE = ("Real episode: Cutzo reads your recordings (never changes them), cl
              "word and finds dead air.")
 REAL_BUILD_NOTE = ("Lines up the recordings, cleans the voices, writes down every word and finds dead air. "
                    "A 90-minute episode takes about 15 minutes.")
-ENGINE_NOTE = "Phase 3: transcripts for real episodes; The New Heretics' video is on its way. Sample episodes stay pretend."
+ENGINE_NOTE = "Phase 3: transcripts for real episodes and The New Heretics' video at 1080p. Sample episodes stay pretend."
 NO_TRANSCRIPT = ("This episode has no transcript yet. Transcribe it (it takes a few minutes), then cut by words. "
                  "Until then, cut by time.")
 ANGLE_ALIASES = {"everyone", "all", "wide", "grid", "group", "everybody"}
@@ -977,7 +978,10 @@ class Cutzo:
         self._log(source, "set_camera", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
         return {"edit": self._edit_view(edit, ep), "summary": summary}
 
-    def add_chapter(self, episode: str, time: Any, title: str, source: str = "you") -> dict[str, Any]:
+    def add_chapter(self, episode: str, time: Any, title: str, source: str = "you",
+                    segment: bool | None = None) -> dict[str, Any]:
+        """Add (or rename) a chapter. `segment`: for shows with music breaks between segments (The New
+        Heretics), whether this chapter starts a new segment, with a break before it."""
         with self._lock:
             ep = self._load(self.resolve_episode(episode))
             self._require_built(ep)
@@ -993,14 +997,19 @@ class Cutzo:
             if near:
                 before = dict(near)
                 near.update(title=title, by=source)
+                if segment is not None:
+                    near["segment"] = bool(segment)
                 summary = f"Renamed the chapter at {fmt_time(near['time'])} to \u201c{title}\u201d"
                 self._push_history(ep, {"op": "update_chapter", "before": before, "summary": summary})
                 chapter = near
             else:
                 chapter = self._new_chapter(ep, t, title, by=source)
+                if segment:
+                    chapter["segment"] = True
                 ep["chapters"].append(chapter)
                 ep["chapters"].sort(key=lambda c: c["time"])
-                summary = f"Added chapter \u201c{title}\u201d at {fmt_time(t)}"
+                kind = "segment" if segment else "chapter"
+                summary = f"Added {kind} \u201c{title}\u201d at {fmt_time(t)}"
                 self._push_history(ep, {"op": "add_chapter", "id": chapter["id"], "summary": summary})
             self._save(ep)
         self._log(source, "add_chapter", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
@@ -1013,6 +1022,51 @@ class Cutzo:
             at = layout.chapters[[c["id"] for c in ordered].index(chapter["id"])]["time"]
         return {"chapter": self._chapter_view(chapter, ep, show, at), "summary": summary,
                 "voiced_title": voiced["name"] if voiced else None}
+
+    def set_segment(self, episode: str, chapter_id: str, segment: Any = True, source: str = "you") -> dict[str, Any]:
+        """Mark a chapter as the start of a new segment (a music break plays before it) or not."""
+        on = segment if isinstance(segment, bool) else str(segment).strip().lower() in ("1", "true", "yes", "on")
+        with self._lock:
+            ep = self._load(self.resolve_episode(episode))
+            ordered = sorted(ep["chapters"], key=lambda c: c["time"])
+            chapter = next((c for c in ordered if c["id"] == chapter_id), None)
+            if not chapter:
+                raise NotFound(f"No chapter called {chapter_id!r} in this episode.")
+            if on and chapter is ordered[0]:
+                raise CutzoError("The first chapter starts the episode, so it can't have a break before it.")
+            before = dict(chapter)
+            chapter["segment"] = on
+            what = "starts a new segment (music break before it)" if on else "is a new topic (no music break)"
+            summary = f"\u201c{chapter['title']}\u201d {what}"
+            self._push_history(ep, {"op": "update_chapter", "before": before, "summary": summary})
+            self._save(ep)
+        self._log(source, "set_segment", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
+        show = showlib.get_show(ep["show"]) or {}
+        return {"chapter": self._chapter_view(chapter, ep, show), "summary": summary}
+
+    def set_video_title(self, episode: str, label: Any = None, title: Any = None, guests: Any = None,
+                        source: str = "you") -> dict[str, Any]:
+        """The episode title graphic's three lines (The New Heretics): a label ("HALLOWEEN SPECIAL:"),
+        the title, and a guests line ("ft. Two exJWs"). Leave a line out to keep it; "" clears it."""
+        with self._lock:
+            ep = self._load(self.resolve_episode(episode))
+            lines = titles.lines_for(ep)
+            for key, value in (("label", label), ("title", title), ("guests", guests)):
+                if value is not None:
+                    text = " ".join(str(value).split())
+                    if len(text) > 80:
+                        raise CutzoError("Keep each line of the title graphic under 80 characters.")
+                    lines[key] = text
+            if not any(lines.values()):
+                raise CutzoError("The title graphic needs at least one line.")
+            before = ep.get("video_title")
+            ep["video_title"] = lines
+            shown = " / ".join(v for v in (lines["label"].upper(), lines["title"].upper(), lines["guests"]) if v)
+            summary = f"Title graphic set to \u201c{shown}\u201d"
+            self._push_history(ep, {"op": "video_title", "before": before, "summary": summary})
+            self._save(ep)
+        self._log(source, "set_video_title", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
+        return {"video_title": lines, "summary": summary}
 
     def remove_chapter(self, episode: str, chapter_id: str, source: str = "you") -> dict[str, Any]:
         with self._lock:
@@ -1029,7 +1083,7 @@ class Cutzo:
 
     # ------------------------------------------------------- highlight picks
     PICK_KINDS = {"cold_open": "cold open", "outro": "sign-off"}
-    PICK_LIMITS = {"cold_open": 45.0, "outro": 60.0}
+    PICK_LIMITS = {"cold_open": 45.0, "outro": 90.0}
 
     def _pick_kind(self, kind: str) -> str:
         k = str(kind or "").strip().lower().replace("-", " ").replace("_", " ")
@@ -1161,6 +1215,12 @@ class Cutzo:
             ep.setdefault("picks", {}).setdefault(item["kind"], []).append(item["pick"])
             ep["picks"][item["kind"]].sort(key=lambda p: int(re.sub(r"\D", "", p["id"]) or 0))
             return True
+        if op == "video_title":
+            if item.get("before") is None:
+                ep.pop("video_title", None)
+            else:
+                ep["video_title"] = item["before"]
+            return True
         if op == "asset":
             overrides = ep.setdefault("assets", {})
             if item.get("before") is None:
@@ -1189,10 +1249,15 @@ class Cutzo:
             if p["id"] not in [c["id"] for c in chosen]:
                 chosen.append(p)
         if not ep.get("sample"):
-            video = [p["label"] for p in chosen if p["kind"] == "video"]
-            if video:
-                raise CutzoError(f"{', '.join(video)}: video exports arrive in Phase 3. Audio exports work now.",
+            video = [p for p in chosen if p["kind"] == "video"]
+            has_picture = (recipes.RECIPES.get(show.get("recipe") or "") or {}) is recipes.NEW_HERETICS
+            if video and not has_picture:
+                raise CutzoError(f"{show.get('name', 'This show')} is audio only, so there's no video to export.",
                                  hint="Export podcast-mp3 (or podcast-aac) for this episode.")
+            unmade = [p["label"] for p in video if not p.get("spec")]
+            if unmade:
+                raise CutzoError(f"{', '.join(unmade)}: Cutzo makes video at 1080p for now (your pick).",
+                                 hint="Export youtube-1080p (or substack-video) instead.")
             if not (self._ep_dir(ep_id) / "voice.f32").exists():
                 raise CutzoError("This episode's cleaned audio is missing, so it can't be exported.",
                                  hint="Build the episode again first.")
@@ -1233,41 +1298,43 @@ class Cutzo:
                 return kit.local_copy(asset_id, kit_dir=kit_dir, drive=self.drive, check=ctx.check)
 
             def length_of(asset_id: str) -> float:
+                asset = kit.get_asset(asset_id) or {}
+                if asset.get("kind") == "video" and asset.get("seconds"):
+                    return float(asset["seconds"])  # its picture: don't decode a long video's sound for this
                 return audio.Pcm(kit_file(asset_id), channels=2).duration
 
+            def loudness_of(asset_id: str) -> float:
+                return kit.loudness(asset_id, kit_dir=kit_dir, drive=self.drive, check=ctx.check)
+
             layout = recipes.plan_episode(ep, show, voice_path=voice_path, talk_lufs=talk, kit_file=kit_file,
-                                          length_of=length_of)
+                                          length_of=length_of, loudness_of=loudness_of)
             mix_path = self.guard.writable(ep_dir / "mix.f32")
+            work_dir = self.guard.writable(ep_dir / "work-export")
             entries = []
+            tags = {"title": ep["title"], "artist": show.get("network") or show.get("name", ""),
+                    "album": show.get("name", ""), "genre": "Podcast", "date": ep["created"][:4],
+                    "encoded_by": f"Cutzo {__version__}"}
             try:
-                render.mix(layout, mix_path, check=ctx.check, progress=lambda p: ctx.step("Mixing", 0.05 + 0.25 * p))
+                render.mix(layout, mix_path, check=ctx.check, progress=lambda p: ctx.step("Mixing", 0.05 + 0.15 * p))
                 n = len(plan)
                 for k, item in enumerate(plan):
                     preset = presets.get_preset(item["target"]) or {}
                     spec = preset["spec"]
                     dst = self.guard.writable(item["file"])
                     dst.parent.mkdir(parents=True, exist_ok=True)
-                    base, size = 0.3 + 0.7 * k / n, 0.7 / n
-                    tags = {"title": ep["title"], "artist": show.get("network") or show.get("name", ""),
-                            "album": show.get("name", ""), "genre": "Podcast", "date": ep["created"][:4],
-                            "encoded_by": f"Cutzo {__version__}"}
-                    made = render.encode(mix_path, dst, spec, tags=tags, chapters=layout.chapters, total=layout.total,
-                                         check=ctx.check,
-                                         progress=lambda p, label, base=base, size=size: ctx.step(label, base + 0.6 * size * p))
-                    ctx.step(f"Checking {item['label']}", base + 0.65 * size, "ffprobe and a loudness scan")
-                    checked = render.check_file(dst, spec, check=ctx.check)
-                    off = spec["loudness"] - checked["loudness"]["integrated"]
-                    over = checked["loudness"]["true_peak"] - spec["true_peak_max"]
-                    if abs(off) > 0.3 or over > 0:
-                        # The limiter took a little loudness away, or encoding pushed a peak over the
-                        # limit: nudge the gain, lower the limiter if needed, and encode once more.
-                        ceiling = made["ceiling_db"] - (over + 0.5 if over > 0 else 0.0)
-                        made = render.encode(mix_path, dst, spec, tags=tags, chapters=layout.chapters, total=layout.total,
-                                             check=ctx.check, measured=made["before"], trim_db=off, ceiling_db=ceiling,
-                                             progress=lambda p, label, base=base, size=size:
-                                             ctx.step("Fine-tuning the loudness", base + (0.7 + 0.2 * p) * size))
-                        ctx.step(f"Checking {item['label']} again", base + 0.92 * size, "ffprobe and a loudness scan")
-                        checked = render.check_file(dst, spec, check=ctx.check)
+                    base, size = 0.2 + 0.8 * k / n, 0.8 / n
+
+                    def step(label: str, share: float, detail: str | None = None, base=base, size=size) -> None:
+                        ctx.step(label, base + share * size, detail)
+
+                    if preset["kind"] == "video":
+                        made, checked, seconds = self._export_video(
+                            ep, layout, item, spec, dst, mix_path=mix_path, talk=talk, kit_dir=kit_dir,
+                            work_dir=work_dir, tags=tags, step=step, check=ctx.check)
+                    else:
+                        made, checked = self._encode_checked(mix_path, dst, spec, tags=tags, layout=layout, label=item["label"],
+                                                             step=step, check=ctx.check)
+                        seconds = layout.total
                     with self._lock:
                         ep = self._load(ep_id)
                         entry = {
@@ -1279,26 +1346,85 @@ class Cutzo:
                             "at": now_iso(),
                             "sample": False,
                             "written": True,
-                            "final_length": fmt_duration(layout.total),
-                            "seconds": round(layout.total, 3),
+                            "final_length": fmt_duration(seconds),
+                            "seconds": round(seconds, 3),
                             "bytes": checked["bytes"],
                             "layout": recipes.describe(layout),
                             "loudness_change_db": made["gain_db"],
                             "check": {"passed": checked["passed"], "sample": False, "checked_at": now_iso(),
                                       "rules": checked["rules"]},
                         }
+                        if preset["kind"] == "video":
+                            entry["encoder"] = "NVIDIA NVENC" if videolib.nvenc_available() else "x264 (processor)"
                         ep["exports"] = [x for x in ep.get("exports", []) if x["target"] != item["target"]] + [entry]
                         ep["stages"]["export"] = "done"
                         self._save(ep)
                     entries.append(entry)
             finally:
                 mix_path.unlink(missing_ok=True)
+                shutil.rmtree(work_dir, ignore_errors=True)
             failed = [e for e in entries if not e["check"]["passed"]]
             labels = ", ".join(e["label"] for e in entries)
             summary = f"Exported {labels} ({entries[0]['final_length']})." if entries else "Nothing exported."
             summary += " Some checks failed; see the Export tab." if failed else " All checks passed."
             return {"summary": summary, "exports": entries}
         return work
+
+    def _encode_checked(self, mix_path: Path, dst: Path, spec: dict[str, Any], *, tags: dict[str, str],
+                        layout: render.Plan, label: str, step, check) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Encode the mix to `dst` at the target loudness, check it, and if the loudness came out a
+        little off (the limiter took some away, or encoding pushed a peak over), encode once more."""
+        made = render.encode(mix_path, dst, spec, tags=tags, chapters=layout.chapters, total=layout.total, check=check,
+                             progress=lambda p, text: step(text, 0.6 * p))
+        step(f"Checking {label}", 0.65, "ffprobe and a loudness scan")
+        checked = render.check_file(dst, spec, check=check)
+        off = spec["loudness"] - checked["loudness"]["integrated"]
+        over = checked["loudness"]["true_peak"] - spec["true_peak_max"]
+        if abs(off) > 0.3 or over > 0:
+            ceiling = made["ceiling_db"] - (over + 0.5 if over > 0 else 0.0)
+            made = render.encode(mix_path, dst, spec, tags=tags, chapters=layout.chapters, total=layout.total,
+                                 check=check, measured=made["before"], trim_db=off, ceiling_db=ceiling,
+                                 progress=lambda p, text: step("Fine-tuning the loudness", 0.7 + 0.2 * p))
+            step(f"Checking {label} again", 0.92, "ffprobe and a loudness scan")
+            checked = render.check_file(dst, spec, check=check)
+        return made, checked
+
+    def _export_video(self, ep: dict[str, Any], layout: render.Plan, item: dict[str, Any], spec: dict[str, Any],
+                      dst: Path, *, mix_path: Path, talk: float, kit_dir: Path, work_dir: Path, tags: dict[str, str],
+                      step, check) -> tuple[dict[str, Any], dict[str, Any], float]:
+        """The finished video: 1080p copies of the kit videos (first time only), the sound (encoded and
+        checked first), then the picture with the sound copied in, then the checks."""
+        work_dir.mkdir(parents=True, exist_ok=True)
+        needs = videolib.needed(layout.picture) if layout.picture else {}
+        for k, (asset_id, until) in enumerate(sorted(needs.items())):
+            name = (kit.get_asset(asset_id) or {}).get("name", asset_id)
+            step("Preparing the show's videos", 0.02 + 0.13 * k / max(1, len(needs)),
+                 f"{name} at 1080p (only the first time; the copy is kept)")
+            kit.video_copy(asset_id, kit_dir=kit_dir, drive=self.drive, until=until, check=check,
+                           progress=lambda p, k=k, name=name: step("Preparing the show's videos",
+                                                                   0.02 + 0.13 * (k + p) / max(1, len(needs)),
+                                                                   f"{name} at 1080p (only the first time)"))
+        sound = work_dir / "video-sound.m4a"
+        made, sound_check = self._encode_checked(
+            mix_path, sound, spec, tags=tags, layout=layout, label="the sound",
+            step=lambda text, share, detail=None: step(text if "Check" not in text else "Checking the sound",
+                                                       0.15 + 0.05 * share, detail),
+            check=check)
+        step("Drawing the video", 0.2, "Background, montage, title graphic and spectrum, frame by frame")
+        videolib.render_video(
+            layout, audio_path=sound, mix_path=mix_path, talk_lufs=talk, dst=dst, video=spec["video"],
+            kit_video=lambda asset_id, until: kit.video_copy(asset_id, kit_dir=kit_dir, drive=self.drive, until=until,
+                                                            check=check),
+            title_lines=titles.lines_for(ep), work_dir=work_dir, check=check,
+            progress=lambda p: step("Drawing the video", 0.2 + 0.76 * p,
+                                    "Background, montage, title graphic and spectrum, frame by frame"))
+        step(f"Checking {item['label']}", 0.97, "ffprobe and the sound's loudness")
+        checked = videolib.check_video(dst, spec, audio_loudness=sound_check["loudness"],
+                                       expected_seconds=layout.total, check=check)
+        if not sound_check["passed"]:
+            checked["passed"] = False
+            checked["rules"] += [r for r in sound_check["rules"] if not r["pass"]]
+        return made, checked, layout.total
 
     def _talk_loudness(self, ep_id: str, check=None) -> float:
         """How loud the cleaned conversation is (LUFS), measured once per build."""
@@ -1817,7 +1943,8 @@ class Cutzo:
             return None
         try:
             return recipes.plan_episode(ep, show, voice_path=Path("voice.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
-                                        kit_file=lambda asset: Path(asset), length_of=lambda asset: 1e9)
+                                        kit_file=lambda asset: Path(asset),
+                                        length_of=lambda asset: kit.seconds(asset) or 1e9)
         except CutzoError:
             return None
 
@@ -1826,8 +1953,8 @@ class Cutzo:
         cuts = self._cuts(ep)
         out_t = layout_time if layout_time is not None else timeline.to_output(c["time"], cuts)
         voiced = showlib.segment_title_for(show, c["title"])
-        return {**c, "time_text": fmt_time(c["time"]), "output_time": out_t, "output_text": fmt_time(out_t),
-                "voiced_title": voiced["name"] if voiced else None}
+        return {**c, "segment": bool(c.get("segment")), "time_text": fmt_time(c["time"]), "output_time": out_t,
+                "output_text": fmt_time(out_t), "voiced_title": voiced["name"] if voiced else None}
 
     def _view(self, ep: dict[str, Any]) -> dict[str, Any]:
         show = showlib.get_show(ep["show"]) or {}
@@ -1862,6 +1989,9 @@ class Cutzo:
             "chapter_warnings": warnings,
             "slots": [self._slot_view(show, s, ep.get("assets")) for s in show.get("slots", [])],
             "outputs": show.get("outputs", []),
+            "has_picture": show.get("recipe") == "the-new-heretics",
+            "breaks_at": show.get("breaks_at", "chapters"),
+            "video_title": titles.lines_for(ep) if show.get("recipe") == "the-new-heretics" else None,
             "exports": ep.get("exports", []),
             "has_transcript": bool(self._transcript(ep["id"]).get("words")),
             "has_original": (self._ep_dir(ep["id"]) / "original.m4a").exists(),

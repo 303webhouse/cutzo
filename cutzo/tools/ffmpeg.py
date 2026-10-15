@@ -14,7 +14,7 @@ import re
 import subprocess
 import threading
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import IO, Any, Callable, Iterable
 
 from ..core.errors import CutzoError
 from . import require
@@ -110,6 +110,7 @@ def probe(path: str | Path) -> dict[str, Any]:
             "variable_frame_rate": bool(avg and real and abs(avg - real) > 0.01),
             "pixel_format": video.get("pix_fmt"),
             "color_transfer": video.get("color_transfer"),
+            "color_primaries": video.get("color_primaries"),
             "bit_rate": _int(video.get("bit_rate")),
         }
     return out
@@ -117,21 +118,44 @@ def probe(path: str | Path) -> dict[str, Any]:
 
 # ----------------------------------------------------------------------- run
 def run(args: Iterable[str], *, duration: float | None = None, progress: Progress | None = None,
-        check: Check | None = None, keep_lines: int = 60) -> list[str]:
+        check: Check | None = None, keep_lines: int = 60,
+        feed: Callable[[IO[bytes]], None] | None = None) -> list[str]:
     """Run ffmpeg with progress reports. `check` is called often and may raise to stop it.
+    `feed`, if given, writes what FFmpeg reads as "pipe:0" (in its own thread).
     Returns the last lines FFmpeg printed (where measurements such as loudness appear)."""
-    cmd = [str(require("ffmpeg")), "-hide_banner", "-nostdin", "-y", "-nostats", "-progress", "pipe:1", *map(str, args)]
-    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace", **_quiet())
+    cmd = [str(require("ffmpeg")), "-hide_banner", "-y", "-nostats", "-progress", "pipe:1", *map(str, args)]
+    if feed is None:
+        cmd.insert(2, "-nostdin")
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if feed else subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", **_quiet())
     tail: collections.deque[str] = collections.deque(maxlen=keep_lines)
+    fed: list[BaseException] = []
 
     def drain() -> None:
         assert proc.stderr is not None
         for line in proc.stderr:
             tail.append(line.rstrip())
 
+    def write() -> None:
+        assert proc.stdin is not None and feed is not None
+        try:
+            feed(proc.stdin.buffer)
+        except (BrokenPipeError, ConnectionResetError, ValueError):
+            pass  # FFmpeg stopped reading (finished early or failed): its own error says why
+        except BaseException as exc:  # noqa: BLE001 - reported below, after FFmpeg is stopped
+            fed.append(exc)
+            proc.kill()
+        finally:
+            try:
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+
     reader = threading.Thread(target=drain, daemon=True)
     reader.start()
+    writer = threading.Thread(target=write, daemon=True) if feed else None
+    if writer:
+        writer.start()
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -150,6 +174,10 @@ def run(args: Iterable[str], *, duration: float | None = None, progress: Progres
         raise
     finally:
         reader.join(timeout=10)
+        if writer:
+            writer.join(timeout=10)
+    if fed:
+        raise fed[0]
     if proc.returncode != 0:
         lines = [x for x in tail if x.strip()]
         reason = lines[-1] if lines else f"exit code {proc.returncode}"

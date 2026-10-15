@@ -4,6 +4,8 @@ A render is a list of pieces placed on the finished timeline. The conversation
 pieces come from voice.f32 (the parts you kept, joined with short crossfades);
 show-kit pieces (music, stingers, sound bites) come from the kit folder. Pieces
 are mixed into one stereo working file, then FFmpeg sets the loudness and encodes.
+Shows with video (The New Heretics) also get a `Picture`: the layers of the frame over
+time, which cutzo.core.video turns into the finished video.
 
 Times: `start`/`end` are inside the piece's source, `at` is on the finished timeline.
 """
@@ -42,7 +44,9 @@ class Piece:
     fade_out: float = 0.0
     kind: str = "voice"  # voice, music, effect, bite
     label: str = ""
-    curve: str = "linear"  # fades: "linear" (crossfades at cuts) or "exp" (smooth music fades, like Premiere's)
+    # fades: "linear" (crossfades at cuts), "exp" (rises evenly in decibels from -50 dB) or "premiere"
+    # (evenly from -30 dB, the shape of Nick's music fade-ins in Spooky Sode, measured Oct 15, 2026)
+    curve: str = "linear"
 
     @property
     def length(self) -> float:
@@ -58,16 +62,55 @@ class Piece:
 
 
 @dataclass
+class Layer:
+    """One picture on the finished timeline. Layers stack in order: later ones cover earlier ones.
+
+    kind "video": a kit video (`src` is its id) from `start` seconds into it; "still": one frame of a
+    kit video (the one at `start`), held; "title": the episode's title graphic. Fades are dissolves
+    (the layer goes see-through)."""
+    kind: str
+    src: str
+    at: float
+    length: float
+    start: float = 0.0
+    fade_in: float = 0.0
+    fade_out: float = 0.0
+    label: str = ""
+
+    @property
+    def until(self) -> float:
+        return self.at + self.length
+
+    def view(self) -> dict[str, Any]:
+        return {"kind": self.kind, "src": self.src, "label": self.label, "at": round(self.at, 3),
+                "length": round(self.length, 3)}
+
+
+@dataclass
+class Picture:
+    """What the video shows: the layers, when the spectrum shows ((start, end, fade in, fade out)
+    windows) and how long the picture takes to fade to black at the very end."""
+    layers: list[Layer] = field(default_factory=list)
+    spectrum: list[tuple[float, float, float, float]] = field(default_factory=list)
+    fade_to_black: float = 0.0
+
+
+@dataclass
 class Plan:
     pieces: list[Piece] = field(default_factory=list)
     chapters: list[dict[str, Any]] = field(default_factory=list)  # finished-file times
     talk_start: float = 0.0
     talk_end: float = 0.0
     duck_db: float = 0.0  # how far music dips while someone talks over it (0 = never)
+    picture: Picture | None = None
+    talk_reference_lufs: float = -19.2  # the talk loudness the kit levels were measured against
 
     @property
     def total(self) -> float:
-        return max((p.until for p in self.pieces), default=0.0)
+        ends = [p.until for p in self.pieces]
+        if self.picture:
+            ends += [layer.until for layer in self.picture.layers]
+        return max(ends, default=0.0)
 
     def voice_spans(self) -> list[tuple[float, float]]:
         """When someone is talking on the finished timeline (gaps under DUCK_JOIN joined)."""
@@ -198,9 +241,12 @@ def mix(plan: Plan, dst: Path, *, check: Callable[[], None] | None = None,
 
 
 def _shape(ramp: np.ndarray, curve: str) -> np.ndarray:
-    """0..1 ramp -> gain. "exp" rises evenly in decibels (-50 dB to 0), which sounds smooth for music."""
+    """0..1 ramp -> gain. "exp" rises evenly in decibels (-50 dB to 0), which sounds smooth for music;
+    "premiere" rises evenly from -30 dB (starting from silence over the first tenth, so there's no click)."""
     if curve == "exp":
         return np.where(ramp <= 0.0, 0.0, 10.0 ** ((ramp - 1.0) * 2.5)).astype(np.float32)
+    if curve == "premiere":
+        return (10.0 ** ((ramp - 1.0) * 1.5) * np.clip(ramp * 10.0, 0.0, 1.0)).astype(np.float32)
     return ramp.astype(np.float32)
 
 
@@ -267,7 +313,11 @@ def check_file(path: Path, spec: dict[str, Any], *, check: Callable[[], None] | 
          {1: "Mono", 2: "Stereo"}.get(a.get("channels"), str(a.get("channels"))), a.get("channels") == spec["channels"])
     rule("Sample rate", f"{spec['rate'] / 1000:g} kHz", f"{(a.get('rate') or 0) / 1000:g} kHz", a.get("rate") == spec["rate"])
     kbps = round((a.get("bit_rate") or info.get("bit_rate") or 0) / 1000)
-    rule("Bitrate", f"{spec['bitrate_kbps']} kbps", f"{kbps} kbps", abs(kbps - spec["bitrate_kbps"]) <= 8)
+    if spec["codec"] == "aac":  # AAC spends fewer bits on simple sound: the target is an upper bound
+        rule("Bitrate", f"up to {spec['bitrate_kbps']} kbps", f"{kbps} kbps",
+             spec["bitrate_kbps"] * 0.4 <= kbps <= spec["bitrate_kbps"] + 16)
+    else:
+        rule("Bitrate", f"{spec['bitrate_kbps']} kbps", f"{kbps} kbps", abs(kbps - spec["bitrate_kbps"]) <= 8)
     rule("Loudness", f"{spec['loudness']:g} LUFS (±{spec['loudness_tolerance']:g})", f"{lv['integrated']:.1f} LUFS",
          abs(lv["integrated"] - spec["loudness"]) <= spec["loudness_tolerance"])
     rule("Peaks", f"at or below {spec['true_peak_max']:g} dBTP", f"{lv['true_peak']:.1f} dBTP",

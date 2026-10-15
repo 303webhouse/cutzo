@@ -35,8 +35,8 @@ background, audio spectrum and opening montage).
 This is Phase {PHASE}. Episodes marked sample are pretend data. Real episodes are built for real:
 Cutzo lines up the recordings, cleans the voices (noise removal, de-essing, leveling), writes down
 every word with its time (speech to text, fillers like "um" included) and finds dead air; export
-writes a real MP3 checked against the podcast rules. Video exports for The New Heretics are still
-being built in Phase 3.
+writes real files checked against each platform's rules: the podcast MP3 and, for The New Heretics,
+the 1080p YouTube video.
 
 How to work:
 - Start with list_episodes, then get_episode and get_transcript. A 90-minute transcript is about
@@ -49,6 +49,11 @@ How to work:
 - The Dig's finished file follows Nick's own layout: a cold open of highlights, the theme and sound
   bites, the conversation with a theme break and stinger before each new chapter, then sign-off clips.
   add_highlight picks the cold-open and sign-off stretches; chapters mark where segments start.
+- The New Heretics follows Nick's Spooky Sode edit: a teaser (add_highlight 'cold open') that ends as
+  the opening montage's music starts, the montage, the talk over the background loop with the episode
+  title graphic (set_title_graphic) and the audio spectrum, then the ending music and Full Flames under
+  the sign-off picks. Every chapter is a new topic (a page flip in a short pause); chapters marked as
+  a new segment (add_chapter new_segment=true, or mark_segment) get a music break before them instead.
 - Long jobs (import_media, build_episode, transcribe_episode, export) return a job id at once; poll
   job_status. Building a 90-minute episode takes about 15 minutes, transcribing alone about 4.
 - Every change is logged as "Claude" and shows up live in Cutzo's window. undo_last_change
@@ -228,7 +233,9 @@ def get_episode(
         "camera_choices": [{"id": x["id"], "from": x["start_text"], "to": x["end_text"], "angle": x.get("angle"),
                             "by": x.get("by")} for x in e["edits"] if x["type"] == "camera"] or None,
         "chapters": [{"id": c["id"], "at": c["time_text"], "title": c["title"], "in_finished_file": c["output_text"],
-                      "voiced_title": c.get("voiced_title")} for c in e["chapters"]],
+                      "voiced_title": c.get("voiced_title"), "new_segment": c.get("segment") or None}
+                     for c in e["chapters"]],
+        "title_graphic": e.get("video_title"),
         "youtube_chapters": e.get("youtube_chapters") or None,
         "chapter_warnings": e.get("chapter_warnings") or None,
         "show_kit": {s["label"]: (s["asset"] or {}).get("name") for s in e["slots"]},
@@ -386,14 +393,41 @@ def set_camera(
 @server.tool(annotations=CHANGE, structured_output=False)
 def add_chapter(
     episode: Episode, time: Time,
-    title: Annotated[str, Field(description="Chapter title (YouTube shows it). Matching a voiced segment title plays that clip.")],
+    title: Annotated[str, Field(description="Chapter title (YouTube shows it).")],
+    new_segment: Annotated[bool | None, Field(description="The New Heretics: true if this chapter starts a new segment "
+                                                          "(a music break plays before it). Leave out for a new topic.")] = None,
 ) -> dict[str, Any]:
     """Add a chapter mark (or rename the one within a second of that time)."""
-    res = engine.call("POST", _ep(episode) + "/chapters", {"time": time, "title": title})
+    res = engine.call("POST", _ep(episode) + "/chapters", {"time": time, "title": title, "segment": new_segment})
     out = {"done": res["summary"], "in_finished_file": res["chapter"]["output_text"]}
     if res.get("voiced_title"):
         out["voiced_title"] = f"Plays {res['voiced_title']} at this chapter."
     return out
+
+
+@server.tool(annotations=CHANGE, structured_output=False)
+def mark_segment(
+    episode: Episode,
+    chapter: Annotated[str, Field(description="The chapter's id (from get_episode).")],
+    starts_segment: Annotated[bool, Field(description="True: a music break plays before this chapter. "
+                                                      "False: it's just a new topic (page flip only).")] = True,
+) -> dict[str, Any]:
+    """The New Heretics: say whether a chapter starts a new segment, with a music break before it."""
+    res = engine.call("POST", _ep(episode) + f"/chapters/{chapter}/segment", {"segment": starts_segment})
+    return {"done": res["summary"], "in_finished_file": res["chapter"]["output_text"]}
+
+
+@server.tool(annotations=CHANGE, structured_output=False)
+def set_title_graphic(
+    episode: Episode,
+    label: Annotated[str | None, Field(description="Top line in bold capitals, e.g. 'Halloween Special:'. '' removes it.")] = None,
+    title: Annotated[str | None, Field(description="The episode title, shown in capitals, e.g. 'JW Ghost Stories'.")] = None,
+    guests: Annotated[str | None, Field(description="Small line under it, e.g. 'ft. Two exJWs'. '' removes it.")] = None,
+) -> dict[str, Any]:
+    """The New Heretics: the episode title graphic shown under the show's name during the talk.
+    Lines left out stay as they are; by default Cutzo splits the episode title at its colon."""
+    res = engine.call("POST", _ep(episode) + "/video-title", {"label": label, "title": title, "guests": guests})
+    return {"done": res["summary"]}
 
 
 @server.tool(annotations=CHANGE, structured_output=False)
@@ -462,11 +496,12 @@ def list_assets(show: Annotated[str | None, Field(description="Optional show nam
 @server.tool(annotations=CHANGE, structured_output=False)
 def export(
     episode: Episode,
-    targets: Annotated[list[str] | None, Field(description="Any of: youtube-4k, youtube-1080p, substack-video, podcast-mp3, podcast-aac. Default: the show's usual exports.")] = None,
+    targets: Annotated[list[str] | None, Field(description="Any of: youtube-1080p, substack-video, podcast-mp3, podcast-aac. Default: the show's usual exports.")] = None,
     confirm: Annotated[bool, Field(description="Set true only to replace an export that already finished (ask Nick first).")] = False,
 ) -> dict[str, Any]:
-    """Render the finished files and check each against its platform's rules. Real episodes: audio exports
-    (podcast-mp3, podcast-aac) write real files; video arrives in Phase 3. Returns a job id to poll."""
+    """Render the finished files and check each against its platform's rules. Returns a job id to poll.
+    The New Heretics' 1080p video takes a while: the first time, Cutzo also makes 1080p copies of the
+    show's videos (kept for next time); a 2-hour episode then takes roughly 20-40 minutes."""
     res = engine.call("POST", _ep(episode) + "/export", {"targets": targets, "confirm": confirm})
     return {"job": _job_brief(res["job"]), "files": [t["file"] for t in res["targets"]], "note": res["note"]}
 
@@ -475,7 +510,7 @@ def export(
 def check_export(
     file: Annotated[str | None, Field(description="Full path of an exported file.")] = None,
     episode: Annotated[str | None, Field(description="Or: the episode...")] = None,
-    target: Annotated[str | None, Field(description="...and which export, e.g. 'youtube-4k'.")] = None,
+    target: Annotated[str | None, Field(description="...and which export, e.g. 'youtube-1080p'.")] = None,
 ) -> dict[str, Any]:
     """Check a finished file against its platform's rules (format, size, loudness). Pass or fail per rule."""
     return engine.call("POST", "/api/check-export", {"file": file, "episode": episode, "target": target})

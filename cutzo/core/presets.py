@@ -2,8 +2,9 @@
 
 Specs from the plan doc's Build Notes (YouTube, Substack and Apple pages,
 checked Oct 12-13, 2026). Sample episodes only show the rules. For real episodes,
-audio targets carry a "spec" that the finished file is measured against
-(ffprobe for the format, a loudness scan for the level); video arrives in Phase 3.
+each target Cutzo can make carries a "spec" that the finished file is measured against
+(ffprobe for the format, a loudness scan for the level). Video is made at 1080p (Nick's
+pick, Oct 15, 2026); the 4K target stays listed for later.
 """
 
 from __future__ import annotations
@@ -45,6 +46,12 @@ PRESETS: list[dict[str, Any]] = [
             ("Audio", "AAC, stereo, 48 kHz, 384 kbps"),
             ("Loudness", "-14 LUFS, peaks at or below -1 dBTP"),
         ],
+        "spec": {
+            "codec": "aac", "format": "mp4", "channels": 2, "rate": 48000, "bitrate_kbps": 384,
+            "loudness": -14.0, "loudness_tolerance": 1.0, "true_peak_max": -1.0,
+            "video": {"codec": "h264", "profile": "High", "width": 1920, "height": 1080, "fps": 29.97,
+                      "bitrate_kbps": 8000, "max_kbps": 12000, "min_kbps": 5000, "gop": 15, "faststart": True},
+        },
     },
     {
         "id": "substack-video",
@@ -61,6 +68,13 @@ PRESETS: list[dict[str, Any]] = [
             ("Audio", "AAC"),
             ("Size", "20 GB or less"),
         ],
+        "spec": {
+            "codec": "aac", "format": "mp4", "channels": 2, "rate": 48000, "bitrate_kbps": 192,
+            "loudness": -14.0, "loudness_tolerance": 1.0, "true_peak_max": -1.0,
+            "video": {"codec": "h264", "profile": "High", "width": 1920, "height": 1080, "fps": 29.97,
+                      "bitrate_kbps": 6000, "max_kbps": 8000, "min_kbps": 3000, "gop": 30, "faststart": True,
+                      "max_gb": 20.0},
+        },
     },
     {
         "id": "podcast-mp3",
@@ -132,7 +146,7 @@ def find_preset(query: str) -> dict[str, Any] | None:
     if q in _BY_ID:
         return _public(_BY_ID[q])
     aliases = {
-        "youtube": "youtube-4k", "yt": "youtube-4k", "4k": "youtube-4k", "1080": "youtube-1080p",
+        "youtube": "youtube-1080p", "yt": "youtube-1080p", "4k": "youtube-4k", "1080": "youtube-1080p",
         "1080p": "youtube-1080p", "youtube-1080": "youtube-1080p", "substack": "podcast-mp3",
         "substack-audio": "podcast-mp3", "rss": "podcast-mp3", "mp3": "podcast-mp3", "audio": "podcast-mp3",
         "podcast": "podcast-mp3", "apple": "podcast-aac", "aac": "podcast-aac", "m4a": "podcast-aac",

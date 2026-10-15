@@ -183,7 +183,7 @@ class Spectrum:
         shorter = np.minimum(np.roll(length, 1), np.roll(length, -1))
         side = ((dy > shorter[None, :] - rim_w / 2) & (dy <= length[None, :])).astype(np.float32) * inside
         rim = np.maximum(edge, side) * s.rim_opacity
-        line = np.clip(1.0 - dy / (0.75 * self.k), 0.0, 1.0) * s.line_opacity * self._covered[None, :]
+        line = np.clip(1.0 - dy / (1.2 * self.k), 0.0, 1.0) * s.line_opacity * self._covered[None, :]
         rim = np.maximum(rim, line)
         scale = 255.0 * min(1.0, visible)
         out[a:b] = np.round(fill * scale).astype(np.uint8)

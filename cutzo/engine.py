@@ -87,6 +87,17 @@ class CameraBody(BaseModel):
 class ChapterBody(BaseModel):
     time: TimeValue
     title: str
+    segment: bool | None = None
+
+
+class SegmentBody(BaseModel):
+    segment: bool = True
+
+
+class VideoTitleBody(BaseModel):
+    label: str | None = None
+    title: str | None = None
+    guests: str | None = None
 
 
 class AssetBody(BaseModel):
@@ -292,7 +303,15 @@ def create_app(cutzo: Cutzo, *, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.post("/api/episodes/{episode}/chapters")
     def add_chapter(episode: str, body: ChapterBody, request: Request):
-        return cutzo.add_chapter(episode, body.time, body.title, source=source_of(request))
+        return cutzo.add_chapter(episode, body.time, body.title, source=source_of(request), segment=body.segment)
+
+    @app.post("/api/episodes/{episode}/chapters/{chapter_id}/segment")
+    def set_segment(episode: str, chapter_id: str, body: SegmentBody, request: Request):
+        return cutzo.set_segment(episode, chapter_id, body.segment, source=source_of(request))
+
+    @app.post("/api/episodes/{episode}/video-title")
+    def set_video_title(episode: str, body: VideoTitleBody, request: Request):
+        return cutzo.set_video_title(episode, body.label, body.title, body.guests, source=source_of(request))
 
     @app.delete("/api/episodes/{episode}/chapters/{chapter_id}")
     def remove_chapter(episode: str, chapter_id: str, request: Request):
