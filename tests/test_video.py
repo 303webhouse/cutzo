@@ -230,6 +230,10 @@ def test_video_presets():
     args = video.encoder_args(spec["video"])
     assert "-g" in args or any(a.startswith("keyint=15") for a in args)
     assert args[args.index("-colorspace") + 1] == "bt709"
+    # quality-based with a ceiling (YouTube asks for a variable bitrate), 2 B-frames
+    assert args[args.index("-maxrate") + 1] == "12000k" and args[args.index("-bf") + 1] == "2"
+    assert ("-crf" in args) != ("-cq" in args)
+    assert video.BT709 in video.Graph(1.0, 320, 180).finish(0.5)  # the labels go on the frames (FFmpeg 9)
 
 
 # --------------------------------------------------------- the whole export
@@ -282,7 +286,7 @@ def heretics(tmp_path, monkeypatch):
     monkeypatch.setattr(recipes, "NEW_HERETICS", r)
     monkeypatch.setitem(recipes.RECIPES, "the-new-heretics", r)
     small = copy.deepcopy(presets._BY_ID["youtube-1080p"])
-    small["spec"]["video"].update(width=320, height=180, bitrate_kbps=1500, max_kbps=3000, min_kbps=200)
+    small["spec"]["video"].update(width=320, height=180, max_kbps=3000, min_kbps=50)
     monkeypatch.setitem(presets._BY_ID, "youtube-1080p", small)
     monkeypatch.setattr(kit, "VIDEO_SIZE", (320, 180))
     monkeypatch.setattr(video, "_nvenc", False)

@@ -50,19 +50,28 @@ def nvenc_available() -> bool:
 
 
 def encoder_args(video: dict[str, Any]) -> list[str]:
-    """H.264 High at the target's bitrate, keyframes every `gop` frames, BT.709 colour."""
-    kbps, top = int(video["bitrate_kbps"]), int(video.get("max_kbps", video["bitrate_kbps"] * 1.5))
+    """H.264 High at a set quality (x264's CRF, or NVENC's constant quality), never above the target's
+    `max_kbps`; keyframes every `gop` frames (closed GOP), 2 B-frames, BT.709. YouTube asks for a
+    variable bitrate with no limit (its 8 Mbps for 1080p is a recommendation): a mostly still picture
+    needs far less, so a fixed average undershot anyway (Spooky Sode's came out at 4 Mbps)."""
+    top = int(video["max_kbps"])
+    quality = int(video.get("quality", 18))
     gop = int(video.get("gop", 15))
     if nvenc_available():
         args = ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-profile:v", "high", "-rc", "vbr",
-                "-b:v", f"{kbps}k", "-maxrate", f"{top}k", "-bufsize", f"{2 * top}k", "-g", str(gop), "-bf", "2",
-                "-spatial-aq", "1", "-temporal-aq", "1", "-rc-lookahead", "20"]
+                "-cq", str(quality + 2), "-b:v", "0", "-maxrate", f"{top}k", "-bufsize", f"{2 * top}k",
+                "-g", str(gop), "-bf", "2", "-spatial-aq", "1", "-temporal-aq", "1", "-rc-lookahead", "20"]
     else:
-        args = ["-c:v", "libx264", "-preset", "faster", "-profile:v", "high", "-b:v", f"{kbps}k",
-                "-maxrate", f"{top}k", "-bufsize", f"{2 * top}k",
+        args = ["-c:v", "libx264", "-preset", "faster", "-profile:v", "high", "-crf", str(quality),
+                "-maxrate", f"{top}k", "-bufsize", f"{2 * top}k", "-bf", "2",
                 "-x264-params", f"keyint={gop}:min-keyint={gop}:scenecut=0:open-gop=0"]
     return args + ["-pix_fmt", "yuv420p", "-color_primaries", "bt709", "-color_trc", "bt709",
                    "-colorspace", "bt709", "-color_range", "tv"]
+
+
+# FFmpeg 9 takes the colour labels from the frames, not from -color_primaries and friends (found on
+# Nick's PC, Oct 15: the file said BT.709 for the matrix only), so the last filter sets them.
+BT709 = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
 
 
 def _parts(layer: render.Layer) -> list[tuple[float, float, float, float]]:
@@ -170,9 +179,9 @@ class Graph:
     def finish(self, fade_to_black: float) -> str:
         if fade_to_black > 0:
             self.filters.append(f"[{self.current}]fade=t=out:st={self.total - fade_to_black:.4f}:"
-                                f"d={fade_to_black:.4f}[vout]")
+                                f"d={fade_to_black:.4f},{BT709}[vout]")
         else:
-            self.filters.append(f"[{self.current}]null[vout]")
+            self.filters.append(f"[{self.current}]{BT709}[vout]")
         return ";".join(self.filters)
 
 
@@ -296,10 +305,12 @@ def check_video(path: Path, spec: dict[str, Any], *, audio_loudness: dict[str, f
          and v.get("width") == want["width"] and v.get("height") == want["height"])
     rule("Frame rate", f"{want['fps']:g} fps", f"{v.get('fps') or 0:g} fps", abs((v.get("fps") or 0) - want["fps"]) < 0.02)
     kbps = round((v.get("bit_rate") or 0) / 1000)
-    rule("Video bitrate", f"{want['min_kbps'] / 1000:g}-{want['max_kbps'] / 1000:g} Mbps", f"{kbps / 1000:.1f} Mbps",
+    rule("Video bitrate", f"up to {want['max_kbps'] / 1000:g} Mbps", f"{kbps / 1000:.1f} Mbps",
          want["min_kbps"] <= kbps <= want["max_kbps"])
-    rule("Colour", "BT.709", str(v.get("color_primaries") or "not marked").upper().replace("BT709", "BT.709"),
-         v.get("color_primaries") == "bt709")
+    labels = [v.get("color_primaries"), v.get("color_transfer"), v.get("color_space")]
+    rule("Colour", "BT.709 (primaries, transfer, matrix)",
+         "BT.709" if labels == ["bt709"] * 3 else " / ".join(str(x or "not marked") for x in labels),
+         labels == ["bt709"] * 3)
     gop = keyframe_gap(path)
     rule("Keyframes", f"every {want['gop']} frames", f"every {gop} frames" if gop else "couldn't tell",
          gop is not None and gop <= want["gop"])

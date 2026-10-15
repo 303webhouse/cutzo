@@ -111,6 +111,7 @@ def probe(path: str | Path) -> dict[str, Any]:
             "pixel_format": video.get("pix_fmt"),
             "color_transfer": video.get("color_transfer"),
             "color_primaries": video.get("color_primaries"),
+            "color_space": video.get("color_space"),
             "bit_rate": _int(video.get("bit_rate")),
         }
     return out
