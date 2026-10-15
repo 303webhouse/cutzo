@@ -29,6 +29,7 @@ from . import kit, render, spectrum as spectrumlib, titles
 FPS = "30000/1001"
 FPS_F = 30000 / 1001
 SPLIT_FADES_LONGER_THAN = 4.0  # seconds of plain picture worth a separate, non-blended part
+LOOP_STILLS = True  # pictures (title, spectrum colours) converted once and held, not re-read every frame
 
 KitVideo = Callable[[str, float], Path]  # (asset id, seconds needed from its start) -> 1080p copy
 
@@ -131,22 +132,40 @@ class Graph:
             chain += ",format=yuva420p" + self._fades(at, length, fi, fo)
         self.overlay(chain)
 
+    @staticmethod
+    def _held(index: int, frames: int, at: float = 0.0) -> str:
+        """A picture (an input opened with -framerate FPS, so one tick is one frame) turned into video
+        colours once, then shown for `frames` frames from the frame nearest `at`, instead of decoding
+        and converting the same picture again for every frame."""
+        return (f"[{index}:v]format=rgba,scale=out_color_matrix=bt709:out_range=tv,format=yuva420p,"
+                f"loop=loop={max(0, frames - 1)}:size=1:start=0,setpts=N+{round(at * FPS_F)}")
+
     def image(self, png: Path, x: int, y: int, at: float, length: float, fi: float, fo: float) -> None:
-        k = self.add(["-loop", "1", "-framerate", FPS, "-t", f"{length:.4f}", "-i", str(png)])
-        chain = (f"[{k}:v]format=rgba,setpts=PTS-STARTPTS+{at:.4f}/TB{self._fades(at, length, fi, fo)},"
-                 "scale=out_color_matrix=bt709:out_range=tv,format=yuva420p")
-        self.overlay(chain, x, y)
+        if not LOOP_STILLS:
+            k = self.add(["-loop", "1", "-framerate", FPS, "-t", f"{length:.4f}", "-i", str(png)])
+            chain = (f"[{k}:v]format=rgba,setpts=PTS-STARTPTS+{at:.4f}/TB{self._fades(at, length, fi, fo)},"
+                     "scale=out_color_matrix=bt709:out_range=tv,format=yuva420p")
+            self.overlay(chain, x, y)
+            return
+        k = self.add(["-framerate", FPS, "-i", str(png)])
+        self.overlay(self._held(k, math.ceil(length * FPS_F), at) + self._fades(at, length, fi, fo), x, y)
 
     def spectrum(self, box: spectrumlib.Box, fill_png: Path, rim_png: Path) -> None:
         w, h = box.width, box.height
         k = self.add(["-f", "rawvideo", "-pix_fmt", "gray", "-video_size", f"{w}x{2 * h}", "-framerate", FPS,
                       "-i", "pipe:0"])
-        f = self.add(["-loop", "1", "-framerate", FPS, "-t", f"{self.total:.3f}", "-i", str(fill_png)])
-        r = self.add(["-loop", "1", "-framerate", FPS, "-t", f"{self.total:.3f}", "-i", str(rim_png)])
         self.filters += [f"[{k}:v]split=2[sa][sb]", f"[sa]crop={w}:{h}:0:0[fa]", f"[sb]crop={w}:{h}:0:{h}[ra]"]
-        for colour, alpha in ((f, "fa"), (r, "ra")):
-            self.overlay(f"[{colour}:v]format=rgba[c{alpha}];[c{alpha}][{alpha}]alphamerge,"
-                         "scale=out_color_matrix=bt709:out_range=tv,format=yuva420p", box.x, box.y)
+        if not LOOP_STILLS:
+            f = self.add(["-loop", "1", "-framerate", FPS, "-t", f"{self.total:.3f}", "-i", str(fill_png)])
+            r = self.add(["-loop", "1", "-framerate", FPS, "-t", f"{self.total:.3f}", "-i", str(rim_png)])
+            for colour, alpha in ((f, "fa"), (r, "ra")):
+                self.overlay(f"[{colour}:v]format=rgba[c{alpha}];[c{alpha}][{alpha}]alphamerge,"
+                             "scale=out_color_matrix=bt709:out_range=tv,format=yuva420p", box.x, box.y)
+            return
+        frames = math.ceil(self.total * FPS_F) + 2
+        for png, alpha in ((fill_png, "fa"), (rim_png, "ra")):
+            colour = self.add(["-framerate", FPS, "-i", str(png)])
+            self.overlay(f"{self._held(colour, frames)}[c{alpha}];[c{alpha}][{alpha}]alphamerge", box.x, box.y)
 
     def finish(self, fade_to_black: float) -> str:
         if fade_to_black > 0:

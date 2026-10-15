@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from cutzo import tools
+from cutzo.tools import ffmpeg
 from cutzo.core import captions, kit, presets, recipes, render, shows, spectrum, titles, video
 from cutzo.core.errors import CutzoError
 
@@ -168,6 +169,46 @@ def test_title_graphic_lines_and_placement(tmp_path):
     assert titles.render({}, tmp_path / "n.png") is None
     small = titles.render({"title": "Hi"}, tmp_path / "s.png", width=320, height=180)
     assert small[0] < 170 and small[1] < 100
+
+
+@needs_ffmpeg
+def test_held_pictures_look_the_same_as_reading_them_every_frame(tmp_path, monkeypatch):
+    """The title and the spectrum's colours are converted once and held (LOOP_STILLS): same picture,
+    same fades, same timing as decoding the files again for every frame."""
+    w, h, total = 320, 180, 1.0
+    sp = spectrum.Spectrum(frame_height=h)
+    fill, rim = tmp_path / "fill.png", tmp_path / "rim.png"
+    video._save_rgb(sp.fill_colours(), fill)
+    video._save_rgb(sp.rim_colours(), rim)
+    title = tmp_path / "title.png"
+    x, y, tw, th = titles.render({"label": "Halloween Special:", "title": "Test"}, title, width=w, height=h)
+    bw, bh = sp.box.width, sp.box.height
+    frames = int(total * video.FPS_F) + 2
+    band = np.zeros((2 * bh, bw), np.uint8)
+    band[bh // 3: bh // 2] = 200  # a band of fill
+    band[bh + bh // 2: bh + bh // 2 + 2] = 255  # and a rim line
+
+    def draw(held: bool) -> np.ndarray:
+        monkeypatch.setattr(video, "LOOP_STILLS", held)
+        g = video.Graph(total, w, h)
+        g.image(title, x, y, at=0.2, length=0.6, fi=0.2, fo=0.2)
+        g.spectrum(sp.box, fill, rim)
+        args = [arg for group in g.inputs for arg in group]
+        out = tmp_path / f"held-{held}.rgb"
+        ffmpeg.run([*args, "-filter_complex", g.finish(0.0), "-map", "[vout]", "-t", f"{total}", "-f", "rawvideo",
+                    "-pix_fmt", "rgb24", str(out)], duration=total, feed=lambda pipe: pipe.write(band.tobytes() * frames))
+        return np.fromfile(out, np.uint8).reshape(-1, h, w, 3).astype(int)
+
+    old, new = draw(False), draw(True)
+    assert old.shape == new.shape and old.shape[0] >= 29
+    rows = slice(sp.box.y, sp.box.y + bh)
+    assert np.abs(old[:, rows] - new[:, rows]).max() <= 4  # the spectrum: rounding only
+    assert new[:, sp.box.y + bh // 3: sp.box.y + bh // 2, sp.box.x: sp.box.x + bw].mean() > 40  # its colours show
+    bright = [int(f[y: y + th, x: x + tw].max()) for f in new]
+    before = [int(f[y: y + th, x: x + tw].max()) for f in old]
+    assert bright[5] == 0 and bright[15] > 200 and bright[25] == 0  # in at 0.2 s, out by 0.8 s
+    assert 0 < bright[8] < bright[10] < bright[12] and bright[19] > bright[21] > bright[23] > 0  # fading
+    assert all(abs(a - b) <= 3 for a, b in zip(before[:23], bright[:23]))  # as before (which lost the last frame)
 
 
 def test_set_video_title_and_segments(cutzo):
