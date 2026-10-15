@@ -281,7 +281,7 @@ def test_video_export_end_to_end(heretics):
     app.add_pick(ep_id, "sign-off", 20.0, 22.0)
     app.set_video_title(ep_id, guests="ft. Nobody")
     # One word per burst of "talk" (2.5 s apart), so the captions can be checked against the layout.
-    words = [{"w": f"Word{k}.", "s": 2.5 * k + 0.2, "e": 2.5 * k + 1.8, "sp": None} for k in range(10)]
+    words = [{"w": f"Word{k}.", "s": 2.5 * k + 0.2, "e": 2.5 * k + 0.6, "sp": None} for k in range(10)]
     (app.library / "episodes" / ep_id / "transcript.json").write_text(json.dumps({"speakers": [], "words": words}))
     with pytest.raises(CutzoError):
         app.export(ep_id, ["youtube-4k"])

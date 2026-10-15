@@ -6,8 +6,9 @@ piece plays recording time `start..end` from finished time `at`. Cut words are i
 they never show; words the teaser or sign-off repeat show again there.
 
 Words are grouped into captions the way broadcast subtitles are: at most two lines of 42
-characters, at most 7 seconds, a new caption after a pause or when someone else speaks, and
-"um" and "uh" left out (the rest is word for word).
+characters, at most 7 seconds, a new caption after a pause or when someone else speaks (a word or
+two on their own joins the next caption instead of flashing up alone), and "um" and "uh" left out
+(the rest is word for word, with a capital after the end of a sentence).
 """
 
 from __future__ import annotations
@@ -24,7 +25,9 @@ FILLERS = {"um", "umm", "uh", "uhh", "uhm", "erm", "er", "hmm", "hm", "mm", "mmm
 MAX_CHARS = 42  # per line
 MAX_LINES = 2
 MAX_SECONDS = 7.0
-PAUSE = 0.8  # a silence this long starts a new caption
+PAUSE = 1.0  # a silence this long starts a new caption
+TINY_WORDS = 2  # a caption this short joins the next one if it follows within JOIN seconds
+JOIN = 1.5
 LINGER = 0.4  # a caption stays up a little after its last word (if the next one isn't due yet)
 MIN_SECONDS = 1.0
 _ENDS = (".", "?", "!")
@@ -36,6 +39,7 @@ class Cue:
     start: float
     end: float
     words: list[str] = field(default_factory=list)
+    speaker: Any = None
 
     @property
     def text(self) -> str:
@@ -101,9 +105,9 @@ def cues(words: list[dict[str, Any]], *, max_chars: int = MAX_CHARS, max_lines: 
                 current.words[-1] += text[-1]
             capitalise = capitalise or text[:1].isupper()
             continue
-        if capitalise:
+        if capitalise or (current is not None and current.words[-1].endswith(_ENDS)):
             text = text[:1].upper() + text[1:]
-            capitalise = False
+        capitalise = False
         if current is not None:
             joined = len(current.text) + 1 + len(text)
             new_speaker = w.get("sp") is not None and last_speaker is not None and w.get("sp") != last_speaker
@@ -113,12 +117,25 @@ def cues(words: list[dict[str, Any]], *, max_chars: int = MAX_CHARS, max_lines: 
                 out.append(current)
                 current = None
         if current is None:
-            current = Cue(start=float(w["s"]), end=float(w["e"]))
+            current = Cue(start=float(w["s"]), end=float(w["e"]), speaker=w.get("sp"))
         current.words.append(text)
         current.end = float(w["e"])
         last_end, last_speaker = float(w["e"]), w.get("sp")
     if current is not None:
         out.append(current)
+    # A word or two on their own ("I ... I don't know") join the next caption when it comes soon.
+    joined_up: list[Cue] = []
+    for cue in out:
+        if joined_up:
+            prev = joined_up[-1]
+            tiny = len(prev.words) <= TINY_WORDS or len(cue.words) <= TINY_WORDS
+            fits = len(prev.text) + 1 + len(cue.text) <= room and cue.end - prev.start <= max_seconds
+            if tiny and fits and cue.start - prev.end < JOIN and prev.speaker == cue.speaker:
+                prev.words += cue.words
+                prev.end = cue.end
+                continue
+        joined_up.append(cue)
+    out = joined_up
     # Timing: linger a little, stay up at least MIN_SECONDS when there's room, never overlap.
     for k, cue in enumerate(out):
         nxt = out[k + 1].start if k + 1 < len(out) else float("inf")

@@ -39,16 +39,20 @@ def test_a_word_on_a_join_belongs_to_one_piece_only():
 
 def test_cues_drop_fillers_but_keep_their_punctuation_and_capitals():
     words = [_w("Um,", 0.0, 0.2), _w("so", 0.3, 0.5), _w("we", 0.5, 0.6), _w("went", 0.6, 0.9), _w("uh.", 1.0, 1.2),
-             _w("It", 1.3, 1.4), _w("was", 1.4, 1.6), _w("great.", 1.6, 2.0)]
+             _w("it", 1.3, 1.4), _w("was", 1.4, 1.6), _w("great.", 1.6, 2.0)]
     items = captions.cues(words)
-    assert [c.text for c in items] == ["So we went. It was great."]
+    assert [c.text for c in items] == ["So we went. It was great."]  # and a capital after a full stop
     assert items[0].start == pytest.approx(0.3)
 
 
 def test_cues_break_at_pauses_speakers_and_length():
-    words = [_w("One", 0.0, 0.3, "S1"), _w("two", 0.4, 0.7, "S1"), _w("three", 2.0, 2.3, "S1"),  # 1.3 s pause
-             _w("Four", 2.4, 2.7, "S2")]  # someone else
+    words = [_w("One", 0.0, 0.3, "S1"), _w("two", 0.4, 0.7, "S1"), _w("three", 2.8, 3.1, "S1"),  # 2.1 s pause
+             _w("Four", 3.2, 3.5, "S2")]  # someone else
     assert [c.text for c in captions.cues(words)] == ["One two", "three", "Four"]
+    # A shorter pause still starts a new caption, but a word or two on their own join the next one.
+    words = [_w("I", 0.0, 0.2), _w("I", 1.4, 1.5), _w("don't", 1.5, 1.7), _w("know", 1.7, 2.0), _w("why.", 2.0, 2.3),
+             _w("Then", 4.5, 4.7), _w("we", 4.7, 4.8), _w("left", 4.8, 5.1)]
+    assert [c.text for c in captions.cues(words)] == ["I I don't know why.", "Then we left"]
     long = [_w(f"word{k}", k * 0.25, k * 0.25 + 0.2) for k in range(60)]
     items = captions.cues(long)
     assert all(len(c.text) <= captions.MAX_CHARS * captions.MAX_LINES for c in items)
