@@ -62,8 +62,19 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
   - `core/render.py` turns a layout into a stereo mix (music dips by `Plan.duck_db` while a voice
     plays over it), encodes it (MP3 with chapters and tags, gain plus limiter to the target
     loudness, one fine-tune pass) and checks the file.
+- Phase 3 (transcripts, video) modules:
+  - `tools/parakeet.py` speech to text: NVIDIA's Parakeet TDT 0.6B v3 run by `parakeet-cli`
+    from the pinned whisper.cpp release, on the graphics card. Long recordings go in as
+    overlapping 48 s pieces that meet in pauses (the fast mode takes up to 50 s; the model is
+    weaker near the ends of what it hears). Words carry `w`, `s`, `e`, `p`. It replaced Whisper
+    on Oct 15: fillers without prompting, better word times (2% vs 6% in silence), 65x real time.
+  - `core/cutpoints.py` where a word cut's edges go: both chosen together on the voice's
+    loudness outline, near the gaps, and the stretch taken out must hold the words' sound
+    (otherwise an "um" that runs into the next word gets missed).
+  - `build.transcribe` makes the 16 kHz copy, runs Parakeet and works out who said what from
+    the separate tracks. `transcript.json` sits in the episode folder.
 - Episode folders hold `voice.f32` (cleaned talk, recording time), `original.f32`, the two
-  previews and `waveform-*.json` caches. Exports render `mix.f32` then delete it.
+  previews, `transcript.json` and `waveform-*.json` caches. Exports render `mix.f32` then delete it.
 
 ## Rules to keep
 
@@ -94,16 +105,20 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
 
 Episodes marked `sample` still use the Phase 1 pretend steps (`_apply_sync`, `_apply_voice`,
 `_apply_transcribe`, `_apply_auto_edit`, `_export_work`, `_mock_check`). Real episodes go
-through `_real_build` and `_real_export_work`. The transcribe stage is `"later"` for real
-episodes until Phase 3 (whisper.cpp); stages treat "later" like done. Video export is refused
-for real episodes until Phase 3. New outside programs get their own wrapper in `cutzo/tools/`.
+through `_real_build` and `_real_export_work`. The transcribe stage is `"later"` when speech to
+text isn't installed (stages treat "later" like done; `transcribe` makes it later). Video
+export is refused for real episodes until the video steps of Phase 3. New outside programs get
+their own wrapper in `cutzo/tools/`.
 
 ## Running things
 
 ```
 uv venv --python 3.12 --python-preference only-managed .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
-.venv/bin/python -m cutzo.tools.install   (FFmpeg and DeepFilterNet into ./tools)
+.venv/bin/python -m cutzo.tools.install   (FFmpeg, DeepFilterNet and whisper.cpp into ./tools;
+                                          the Parakeet model is Windows-only: tests use
+                                          whisper.cpp's tiny for-tests-ggml-parakeet-tdt.bin
+                                          from raw.githubusercontent.com, put in CUTZO_TOOLS)
 .venv/bin/python -m pytest             (all tests, about 3 minutes; real-audio tests skip
                                         themselves when FFmpeg isn't installed)
 .venv/bin/python -m cutzo.engine --speed 0.1   (engine with 10x faster pretend jobs)
@@ -111,7 +126,7 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 
 Environment variables: `CUTZO_HOME` (library folder), `CUTZO_PORT`, `CUTZO_SPEED`,
 `CUTZO_DRIVE` (Google Drive folder with the show kits), `CUTZO_TOOLS` (tools folder),
-`CUTZO_TOOLS_ONLY` (ignore programs on PATH).
+`CUTZO_TOOLS_ONLY` (ignore programs on PATH), `CUTZO_PARAKEET_MODEL` (speech model file).
 `tests/test_connector.py` runs the real connector over stdio and lets it start an engine.
 
 ## Nick's PC (checked Oct 13, 2026)
@@ -130,12 +145,17 @@ Environment variables: `CUTZO_HOME` (library folder), `CUTZO_PORT`, `CUTZO_SPEED
 - git 2.53 and gh (signed in as 303webhouse). Library `F:\Cutzo`, app `F:\Cutzo\app`.
 - Free space: C: about 75 GB (never write media there), F: about 710 GB.
 - Google Drive for desktop at `G:\My Drive` (show kits under `Denver Stiffs\The Dig` etc.).
-- Graphics card: NVIDIA GeForce RTX 2070 SUPER (CUDA works with torch 2.5.1+cu124). DeepFilterNet
-  runs on the processor; Cutzo doesn't need the graphics card yet. `F:\Cutzo\lab` is a scratch area for
-  experiments: `cutzo-dev` (a clone of the repo), `models-venv` (Resemble Enhance and
-  VoiceFixer for the listening test), `listen\index.html` (the listening test page).
+- Graphics card: NVIDIA GeForce RTX 2070 SUPER, 8 GB (CUDA works with torch 2.5.1+cu124 and
+  whisper.cpp's CUDA 12.4 build). Speech to text runs on it; DeepFilterNet runs on the processor.
+  `F:\Cutzo\lab` is a scratch area for
+  experiments: `cutzo-dev` (a clone of the repo), `models-venv` (Resemble Enhance, VoiceFixer,
+  matplotlib), `listen\index.html` (the listening test page), `whisper\` and `align\` (the
+  speech-to-text and word-timing trials of Oct 15, with `align_compare.py`, `cut_variants.py`
+  and `filler_plot.py` to measure and draw them).
   `lab\bg.ps1 -Script x.py` runs a lab script in the background with Cutzo's Python and
   writes `x.log`/`x.err`, because Desktop Commander gives up on commands after 60 seconds.
+  `lab\switch_branch.ps1 -Branch b` puts the app on a branch, runs setup and restarts the engine
+  (start it hidden with Start-Process; setup can take minutes).
 
 ## Git
 
