@@ -88,26 +88,33 @@ THE_DIG: dict[str, Any] = {
 #            Full Flames under the sign-off picks, the music staying low under them, and the picture
 #            fades to black as the music ends.
 NEW_HERETICS: dict[str, Any] = {
-    "talk_reference_lufs": -16.5,  # the talk in JW Ghost Stories; every level below is relative to it
+    # Levels as in the YouTube video of Spooky Sode, JW Ghost Stories.mp4 (re-measured Oct 15 in LUFS, each
+    # stretch against the same stretch of its source; Nick's podcast MP3 is a separate export whose only
+    # difference is 239_short2, 3.3 dB louder). The talk there: -16.0 LUFS; every level is relative to it.
+    "talk_reference_lufs": -16.0,
     "teaser": {"at": 1.5, "gain_db": 1.8, "spectrum_early": 0.37, "spectrum_fade_in": 1.87},
     "montage": {"music_at": 1.888, "talk_at": 83.684, "title_at": 91.191, "background_at": 93.36,
-                "gain_db": -5.8, "spectrum_early": 0.3},
+                "gain_db": -5.3, "spectrum_early": 0.3},
+    # Under the talk Nick holds the montage's last frame (the red scene with the show's name) and screens
+    # the fire loop over it at 2.03x speed (4275 s of the loop in 2104.5 s), so it flares about once a
+    # minute; the break visuals and Full Flames are screened too (measured against JW Ghost Stories).
+    "background_speed": 4275.086 / 2104.50,
     "no_montage_gap": 1.0,  # without the montage, the talk starts this long after the teaser
     "fade_back": 1.0,  # title and spectrum fade back in over this long when the talk comes back
     # Music cues: Nick's level (dB from the kit file to the finished episode) and how long each fades
     # in under the talk, from Spooky Sode (short1 and 93696 from his 2024 template). None: not measured,
     # so the level is set by loudness (see break_level_lu / ending_level_lu).
     "cues": {
-        "tnh-cue-239-short3": (-10.6, 28.83),
-        "tnh-cue-239-short2": (-9.0, 14.18),
+        "tnh-cue-239-short3": (-9.4, 28.83),
+        "tnh-cue-239-short2": (-11.8, 14.18),
         "tnh-cue-239-short1": (None, 4.6),
-        "tnh-cue-93696": (-0.5, 25.7),
-        "tnh-cue-239-full": (-17.5, 60.527),
-        "tnh-page-flip": (-0.3, None),
+        "tnh-cue-93696": (-0.5, 25.7),  # from the podcast MP3 (it plays only in the haiku part of a break)
+        "tnh-cue-239-full": (-17.2, 60.527),
+        "tnh-page-flip": (-0.1, None),
     },
     "break_cues": ["tnh-cue-239-short3", "tnh-cue-239-short2", "tnh-cue-239-short1"],
-    "break_level_lu": -1.3,  # a break cue on its own sits this far below the talk...
-    "ending_level_lu": -13.8,  # ...and the ending music under the sign-off this far
+    "break_level_lu": -3.2,  # a break cue on its own sits this far below the talk...
+    "ending_level_lu": -14.3,  # ...and the ending music under the sign-off this far
     "default_lead_in": 14.18,
     "break": {"visuals_start": 0.701, "visuals_late": 0.5, "visuals_out": 1.0, "flip_before_end": 1.268,
               "resume_after_end": 0.3, "no_music_gap": 1.0},
@@ -115,8 +122,10 @@ NEW_HERETICS: dict[str, Any] = {
     "ending": {"cue_start": 0.367, "lead_in": 60.527, "visuals_late": 0.07, "visuals_fade_short": 2.4,
                "visuals_until": 15.6, "flames_at": 15.115, "flames_start": 5.339, "flames_fade_in": 0.5,
                "signoff_at": 18.452, "signoff_gain_db": 0.5, "fade_to_black": 31.966, "after_signoff": 3.0,
-               "no_signoff": 40.0, "no_signoff_fade": 8.0, "title_early": 0.2},
-    "flip_level_lu": -12.6,  # another transition sound: this far below the talk (the page flip's level)
+               "no_signoff": 40.0, "no_signoff_fade": 8.0, "title_early": 0.2,
+               # the montage plays again under the ending visuals and Full Flames
+               "montage_again_at": -0.834, "montage_again_start": 1.034, "montage_again_fade_in": 1.0},
+    "flip_level_lu": -12.9,  # another transition sound: this far below the talk (the page flip's level)
     "loop_fade": 1.0,  # a background loop that runs out starts again with this long a dissolve
 }
 
@@ -251,14 +260,18 @@ def _voice_pieces(voice_path: Path, picks: list[tuple[float, float]], at: float,
 
 
 def _loop(layers: list[render.Layer], asset: str, at: float, until: float, length: float, fade: float,
-          label: str) -> None:
-    """A video from its start for as long as needed, starting again (with a dissolve) when it runs out."""
+          label: str, *, speed: float = 1.0, blend: str = "normal") -> None:
+    """A video from its start for as long as needed, starting again (with a dissolve) when it runs out.
+    `length` is the video's own length; at `speed` it lasts length / speed on the timeline."""
+    length = length / speed
     if length <= 2 * fade:  # too short to loop (or unknown): one long run
         length = max(until - at, 0.0)
     start_at, first = at, True
     while until - start_at > 0.05:
         run = min(until - start_at, length)
-        layers.append(render.Layer("video", asset, at=start_at, length=run, fade_in=0.0 if first else fade, label=label))
+        layers.append(render.Layer("video", asset, at=start_at, length=run, fade_in=0.0 if first else fade,
+                                   fade_out=0.0 if start_at + run >= until - 1e-6 or blend == "normal" else fade,
+                                   label=label, blend=blend, speed=speed))
         if start_at + run >= until - 1e-6:
             break
         start_at, first = start_at + run - fade, False
@@ -274,7 +287,10 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
     plan = render.Plan(talk_reference_lufs=ref)
     pic = render.Picture()
     plan.picture = pic
-    kit_offset = talk_lufs - ref  # keeps Nick's balance whatever level the talk is at
+    # Keeps Nick's balance whatever level the talk is at. The talk is measured on the one-channel voice
+    # track, but in the stereo mix it plays in both channels, 3 dB louder; Nick's levels were measured on
+    # his stereo video, so compare like with like (without this, every cue came out 3 dB low).
+    kit_offset = talk_lufs + render.MONO_IN_STEREO_DB - ref
     T, M, B, E = recipe["teaser"], recipe["montage"], recipe["break"], recipe["ending"]
     montage = slot_choice(show, ep, "montage")
     background = slot_choice(show, ep, "background")
@@ -373,7 +389,7 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
                 vis_at = stop - lead + B["visuals_late"]
                 pic.layers.append(render.Layer("video", break_visuals, at=vis_at, length=resume + B["visuals_out"] - vis_at,
                                                start=B["visuals_start"], fade_in=stop - vis_at,
-                                               fade_out=B["visuals_out"], label="Break visuals"))
+                                               fade_out=B["visuals_out"], label="Break visuals", blend="screen"))
         if sound:
             play(sound, resume - sound[1])
         chapter_at[c["id"]] = resume - (sound[1] if sound else 0.0)
@@ -409,15 +425,20 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
     end_lead = max(lead, 5.0)
     titles.append((title_from, talk_end, title_in, max(0.5, end_lead - E["title_early"])))
     spectrum.append((spectrum_from, talk_end, recipe["fade_back"], end_lead))
+    if montage != "none":
+        again = talk_end + E["montage_again_at"]
+        pic.layers.append(render.Layer("video", montage, at=again, length=end - again, start=E["montage_again_start"],
+                                       fade_in=E["montage_again_fade_in"], label="Montage again"))
     if break_visuals != "none":
         vis_at = talk_end - end_lead + E["visuals_late"]
         pic.layers.append(render.Layer("video", break_visuals, at=vis_at, length=talk_end + E["visuals_until"] - vis_at,
                                        fade_in=max(0.5, end_lead - E["visuals_fade_short"]), fade_out=1.0,
-                                       label="Ending visuals"))
+                                       label="Ending visuals", blend="screen"))
     flames_at = talk_end + E["flames_at"]
     if ending_visuals != "none":
         pic.layers.append(render.Layer("video", ending_visuals, at=flames_at, length=end - flames_at,
-                                       start=E["flames_start"], fade_in=E["flames_fade_in"], label="Ending visuals"))
+                                       start=E["flames_start"], fade_in=E["flames_fade_in"], label="Ending visuals",
+                                       blend="screen"))
     pic.fade_to_black = min(E["fade_to_black"], max(0.0, end - talk_end))
 
     # ---- picture, bottom to top: opening still, montage, background, title, break and ending visuals
@@ -427,6 +448,8 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
             under.append(render.Layer("still", montage, at=0.0, length=m, label="Opening still"))
         mlen = length_of(montage)
         under.append(render.Layer("video", montage, at=m, length=mlen, label="Opening montage"))
+        under.append(render.Layer("still", montage, at=m + mlen, length=max(0.0, end - (m + mlen)),
+                                  start=max(0.0, mlen - 0.1), label="Held title card"))
         plan.pieces.append(render.Piece(src=kit_file(montage), channels=2, start=0.0, end=mlen, at=m,
                                         gain_db=M["gain_db"] + kit_offset, kind="music", label="Opening montage"))
         bg_from = m + M["background_at"]
@@ -435,7 +458,11 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
         if bg_from > 0:
             under.append(render.Layer("still", background, at=0.0, length=bg_from, label="Opening still"))
     bg_until = (flames_at + 1.0) if ending_visuals != "none" else end
-    _loop(under, background, bg_from, bg_until, length_of(background), recipe["loop_fade"], "Background")
+    if m is not None:  # over the held frame, as in Nick's edit
+        _loop(under, background, bg_from, bg_until, length_of(background), recipe["loop_fade"], "Background",
+              speed=recipe["background_speed"], blend="screen")
+    else:  # no montage, so nothing held to screen it over: the loop as it is
+        _loop(under, background, bg_from, bg_until, length_of(background), recipe["loop_fade"], "Background")
     for a, b, fi, fo in titles:
         if b - a > 0.1:
             under.append(render.Layer("title", "episode-title", at=a, length=b - a, fade_in=fi, fade_out=min(fo, b - a),

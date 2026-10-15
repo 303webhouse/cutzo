@@ -13,6 +13,7 @@ Times: `start`/`end` are inside the piece's source, `at` is on the finished time
 from __future__ import annotations
 
 import bisect
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -24,6 +25,7 @@ from . import audio, timeline
 
 XFADE = 0.012  # seconds of crossfade at every cut in the conversation
 PEAK_MARGIN = 2.0  # dB between the limiter and the true-peak limit (room for encoding overshoot)
+MONO_IN_STEREO_DB = 10 * math.log10(2)  # a one-channel sound played in both channels measures 3 dB louder
 MAX_GAIN_TRIES = 3  # measuring passes to find the gain that lands on the loudness target after the limiter
 GAIN_CLOSE_ENOUGH = 0.1  # LU
 # Music dips under voices ("ducking"): it starts going down DUCK_ATTACK seconds before a voice comes
@@ -67,9 +69,12 @@ class Piece:
 class Layer:
     """One picture on the finished timeline. Layers stack in order: later ones cover earlier ones.
 
-    kind "video": a kit video (`src` is its id) from `start` seconds into it; "still": one frame of a
-    kit video (the one at `start`), held; "title": the episode's title graphic. Fades are dissolves
-    (the layer goes see-through)."""
+    kind "video": a kit video (`src` is its id) from `start` seconds into it, played at `speed`;
+    "still": one frame of a kit video (the one at `start`), held; "title": the episode's title graphic.
+
+    blend "normal" covers what's below (fades are dissolves); "screen" lightens it, like Premiere's
+    Screen mode: black lets the picture below show through, so a flame video on black adds only its
+    flames (and its fades go to and from black, which is the same thing as fading its opacity)."""
     kind: str
     src: str
     at: float
@@ -78,14 +83,26 @@ class Layer:
     fade_in: float = 0.0
     fade_out: float = 0.0
     label: str = ""
+    blend: str = "normal"
+    speed: float = 1.0
 
     @property
     def until(self) -> float:
         return self.at + self.length
 
+    @property
+    def reach(self) -> float:
+        """How far into its kit video the layer goes (seconds of the video)."""
+        return self.start + (self.length * self.speed if self.kind == "video" else 0.0)
+
     def view(self) -> dict[str, Any]:
-        return {"kind": self.kind, "src": self.src, "label": self.label, "at": round(self.at, 3),
-                "length": round(self.length, 3)}
+        out = {"kind": self.kind, "src": self.src, "label": self.label, "at": round(self.at, 3),
+               "length": round(self.length, 3)}
+        if self.blend != "normal":
+            out["blend"] = self.blend
+        if self.speed != 1.0:
+            out["speed"] = round(self.speed, 4)
+        return out
 
 
 @dataclass

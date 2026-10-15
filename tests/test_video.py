@@ -36,7 +36,12 @@ SPOOKY = _ep(chapters=[{"id": "c1", "time": 12.2, "title": "The New Heretics"},
              outro=[(7677.303, 7742.435)])
 
 
-def _plan(ep, talk_lufs=-16.5):
+# The one-channel talk level at which every cue plays at exactly Nick's gain: the reference, less the
+# 3 dB the talk gains by playing in both stereo channels.
+REF_MONO = recipes.NEW_HERETICS["talk_reference_lufs"] - render.MONO_IN_STEREO_DB
+
+
+def _plan(ep, talk_lufs=REF_MONO):
     show = shows.get_show("the-new-heretics")
     return recipes.plan_episode(ep, show, voice_path=Path("voice.f32"), talk_lufs=talk_lufs,
                                 kit_file=lambda a: Path(a), length_of=lambda a: kit.seconds(a) or 1e9)
@@ -57,7 +62,19 @@ def test_new_heretics_layout_follows_spooky_sode():
         layers[layer.label].append(layer)
     assert layers["Opening still"][0].at == 0 and layers["Opening still"][0].until == pytest.approx(montage.at)
     assert layers["Background"][0].at == pytest.approx(montage.at + 93.36)
-    assert len(layers["Background"]) == 2 and layers["Background"][1].fade_in == 1.0  # 71-minute loop, run twice
+    # Under the talk: the montage's last frame, held, with the fire loop screened over it at 2.03x speed
+    # (4275 s of loop per 2104.5 s), so a 2-hour episode runs it four times, as in Nick's project.
+    held = layers["Held title card"][0]
+    assert held.kind == "still" and held.at == pytest.approx(montage.until) and held.start > 94.9
+    loop = layers["Background"]
+    assert len(loop) == 4 and all(x.blend == "screen" for x in loop)
+    assert loop[0].speed == pytest.approx(2.0314, abs=1e-4) and loop[0].length == pytest.approx(2104.5, abs=0.1)
+    assert loop[1].fade_in == 1.0 and loop[0].fade_out == 1.0  # one run dissolves into the next
+    assert all(x.blend == "screen" for x in layers["Break visuals"] + layers["Ending visuals"])
+    again = layers["Montage again"][0]  # the montage plays again under the ending visuals and Full Flames
+    assert again.blend == "normal" and again.at == pytest.approx(plan.talk_end - 0.834) and again.start == 1.034
+    order = [layer.label for layer in plan.picture.layers]
+    assert order.index("Montage again") < max(i for i, label in enumerate(order) if label == "Ending visuals")
     assert layers["Episode title"][0].at == pytest.approx(montage.at + 91.191)
     # Breaks: the cue fades in under the last seconds of talk, plays to its end, a page flip, then talk.
     music = by("Break music")
@@ -71,7 +88,7 @@ def test_new_heretics_layout_follows_spooky_sode():
     assert flips[0].at == pytest.approx(music[0].until - 1.268)
     # Ending: music fades in over the last minute of talk; Full Flames, then the sign-off.
     ending = by("Ending music")[0]
-    assert ending.at == pytest.approx(plan.talk_end - 60.527) and ending.gain_db == pytest.approx(-17.5)
+    assert ending.at == pytest.approx(plan.talk_end - 60.527) and ending.gain_db == pytest.approx(-17.2)
     assert by("Sign-off")[0].at == pytest.approx(plan.talk_end + 18.452)
     flames = [x for x in layers["Ending visuals"] if x.src == "tnh-full-flames"][0]
     assert flames.at == pytest.approx(plan.talk_end + 15.115) and flames.until == pytest.approx(plan.total)
@@ -84,16 +101,18 @@ def test_new_heretics_layout_follows_spooky_sode():
 
 
 def test_levels_follow_the_talk_and_unmeasured_cues_match_by_loudness():
-    quiet = _plan(SPOOKY, talk_lufs=-20.5)
+    quiet = _plan(SPOOKY, talk_lufs=REF_MONO - 4.0)
     cue = [p for p in quiet.pieces if p.label == "Break music"][0]
-    assert cue.gain_db == pytest.approx(-10.6 - 4.0)  # 4 dB quieter talk, 4 dB quieter music
+    assert cue.gain_db == pytest.approx(-9.4 - 4.0)  # 4 dB quieter talk, 4 dB quieter music
+    # The talk is measured on one channel; in the stereo mix it is 3 dB louder, and the cues follow that.
+    assert render.MONO_IN_STEREO_DB == pytest.approx(3.01, abs=0.01)
     show = shows.get_show("the-new-heretics")
     ep = copy.deepcopy(SPOOKY)
     ep["assets"] = {"break_music": "tnh-cue-god-of-love", "transition": "none", "spectrum": "none"}
-    plan = recipes.plan_episode(ep, show, voice_path=Path("v.f32"), talk_lufs=-16.5, kit_file=lambda a: Path(a),
+    plan = recipes.plan_episode(ep, show, voice_path=Path("v.f32"), talk_lufs=REF_MONO, kit_file=lambda a: Path(a),
                                 length_of=lambda a: kit.seconds(a) or 1e9, loudness_of=lambda a: -12.0)
     music = [p for p in plan.pieces if p.label == "Break music"]
-    assert all(m.gain_db == pytest.approx(-16.5 - 1.3 + 12.0) for m in music)
+    assert all(m.gain_db == pytest.approx(-16.0 - 3.2 + 12.0) for m in music)
     assert not [p for p in plan.pieces if p.label == "Page flip"] and plan.picture.spectrum == []
 
 
@@ -171,10 +190,28 @@ def test_title_graphic_lines_and_placement(tmp_path):
     assert small[0] < 170 and small[1] < 100
 
 
+def _render_graph(g: video.Graph, out: Path, total: float, w: int, h: int, feed=None) -> np.ndarray:
+    args = [arg for group in g.inputs for arg in group]
+    ffmpeg.run([*args, "-filter_complex", g.finish(0.0), "-map", "[vout]", "-t", f"{total}", "-f", "rawvideo",
+                "-pix_fmt", "rgb24", str(out)], duration=total, feed=feed)
+    return np.fromfile(out, np.uint8).reshape(-1, h, w, 3).astype(int)
+
+
+def _encode_rgb(frames: np.ndarray, dst: Path) -> Path:
+    """RGB frames -> a kit-like video (BT.709, TV range, 29.97 fps), as good as lossless."""
+    n, h, w, _ = frames.shape
+    subprocess.run([str(FFMPEG), "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
+                    "-s", f"{w}x{h}", "-r", "30000/1001", "-i", "-", "-vf",
+                    "scale=out_color_matrix=bt709:out_range=tv,format=yuv444p", "-c:v", "libx264", "-preset",
+                    "ultrafast", "-qp", "0", "-colorspace", "bt709", str(dst)],
+                   input=np.ascontiguousarray(frames, np.uint8).tobytes(), check=True)
+    return dst
+
+
 @needs_ffmpeg
-def test_held_pictures_look_the_same_as_reading_them_every_frame(tmp_path, monkeypatch):
-    """The title and the spectrum's colours are converted once and held (LOOP_STILLS): same picture,
-    same fades, same timing as decoding the files again for every frame."""
+def test_title_and_spectrum_in_the_picture(tmp_path):
+    """The title graphic fades in and out on time in its cream colour; the spectrum's colours show
+    where its lines are (everything drawn in RGB, then BT.709 video colours)."""
     w, h, total = 320, 180, 1.0
     sp = spectrum.Spectrum(frame_height=h)
     fill, rim = tmp_path / "fill.png", tmp_path / "rim.png"
@@ -187,28 +224,44 @@ def test_held_pictures_look_the_same_as_reading_them_every_frame(tmp_path, monke
     band = np.zeros((2 * bh, bw), np.uint8)
     band[bh // 3: bh // 2] = 200  # a band of fill
     band[bh + bh // 2: bh + bh // 2 + 2] = 255  # and a rim line
-
-    def draw(held: bool) -> np.ndarray:
-        monkeypatch.setattr(video, "LOOP_STILLS", held)
-        g = video.Graph(total, w, h)
-        g.image(title, x, y, at=0.2, length=0.6, fi=0.2, fo=0.2)
-        g.spectrum(sp.box, fill, rim)
-        args = [arg for group in g.inputs for arg in group]
-        out = tmp_path / f"held-{held}.rgb"
-        ffmpeg.run([*args, "-filter_complex", g.finish(0.0), "-map", "[vout]", "-t", f"{total}", "-f", "rawvideo",
-                    "-pix_fmt", "rgb24", str(out)], duration=total, feed=lambda pipe: pipe.write(band.tobytes() * frames))
-        return np.fromfile(out, np.uint8).reshape(-1, h, w, 3).astype(int)
-
-    old, new = draw(False), draw(True)
-    assert old.shape == new.shape and old.shape[0] >= 29
-    rows = slice(sp.box.y, sp.box.y + bh)
-    assert np.abs(old[:, rows] - new[:, rows]).max() <= 4  # the spectrum: rounding only
-    assert new[:, sp.box.y + bh // 3: sp.box.y + bh // 2, sp.box.x: sp.box.x + bw].mean() > 40  # its colours show
-    bright = [int(f[y: y + th, x: x + tw].max()) for f in new]
-    before = [int(f[y: y + th, x: x + tw].max()) for f in old]
+    g = video.Graph(total, w, h)
+    g.image(title, x, y, at=0.2, length=0.6, fi=0.2, fo=0.2)
+    g.spectrum(sp.box, fill, rim)
+    out = _render_graph(g, tmp_path / "out.rgb", total, w, h, feed=lambda pipe: pipe.write(band.tobytes() * frames))
+    assert out.shape[0] >= 29
+    lit = out[:, sp.box.y + bh // 3: sp.box.y + bh // 2, sp.box.x: sp.box.x + bw]
+    assert lit.mean() > 40 and (lit[..., 0].mean() > lit[..., 1].mean() > lit[..., 2].mean())  # orange to yellow
+    bright = [int(f[y: y + th, x: x + tw].max()) for f in out]
     assert bright[5] == 0 and bright[15] > 200 and bright[25] == 0  # in at 0.2 s, out by 0.8 s
     assert 0 < bright[8] < bright[10] < bright[12] and bright[19] > bright[21] > bright[23] > 0  # fading
-    assert all(abs(a - b) <= 3 for a, b in zip(before[:23], bright[:23]))  # as before (which lost the last frame)
+    region = out[15, y: y + th, x: x + tw].reshape(-1, 3)
+    cream = region[np.argsort(region.sum(axis=1))[-20:]].mean(axis=0)  # the brightest pixels of the letters
+    # cream (236, 220, 198); thin letters in a small frame lose a little colour to 4:2:0 video
+    assert np.abs(cream - np.array([236, 220, 198])).max() <= 16 and cream[0] > cream[2], cream
+
+
+@needs_ffmpeg
+def test_screen_layers_lighten_and_play_at_their_speed(tmp_path):
+    """A screen layer lightens what's below (255 - (255 - a)(255 - b) / 255), black changes nothing,
+    its fades go to black, and a layer at 2x speed shows its video twice as fast."""
+    w, h = 64, 36
+    grey = _encode_rgb(np.full((20, h, w, 3), 100, np.uint8), tmp_path / "grey.mp4")
+    ramp = np.zeros((200, h, w, 3), np.uint8)
+    for n in range(200):
+        ramp[n] = min(n, 180)  # brightness = frame number
+    ramp_video = _encode_rgb(ramp, tmp_path / "ramp.mp4")
+    g = video.Graph(2.0, w, h)
+    g.still(grey, 0.0, 0.0, 2.0, 0.0, 0.0)
+    g.video(ramp_video, 0.0, 0.0, 2.0, 0.0, 0.5, blend="screen", speed=2.0)
+    out = _render_graph(g, tmp_path / "out.rgb", 2.0, w, h)
+
+    def screen(a: float, b: float) -> float:
+        return 255 - (255 - a) * (255 - b) / 255
+
+    assert out[0, 10, 10, 0] == pytest.approx(100, abs=4)  # black on top: the grey as it was
+    assert out[30, 10, 10, 1] == pytest.approx(screen(100, 60), abs=5)  # frame 30 shows the ramp's frame 60
+    assert out[44, 10, 10, 2] == pytest.approx(screen(100, 88), abs=5)
+    assert out[-1, 10, 10, 0] < out[44, 10, 10, 0]  # fading out to black at the end
 
 
 def test_set_video_title_and_segments(cutzo):

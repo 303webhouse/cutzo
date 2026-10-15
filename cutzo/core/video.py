@@ -1,17 +1,20 @@
 """Making the finished video for shows with a picture (The New Heretics).
 
-The recipe (recipes.py) says what the frame shows over time: layers of kit videos, a still, the
-episode title graphic, and when the spectrum shows. Here FFmpeg puts it together in one pass:
+The recipe (recipes.py) says what the frame shows over time: layers of kit videos, stills, the
+episode title graphic, and when the spectrum shows. Here FFmpeg puts it together in one pass, in
+RGB (planar, so blending is exact):
 
     a black 1080p canvas
-      + each layer on top, at its time (kit videos come from 1080p copies made once, see
-        kit.video_copy), dissolving in and out where the recipe says
-      + the spectrum: Cutzo draws it frame by frame (spectrum.py) and feeds it to FFmpeg as it goes
-      + the fade to black at the end
-    with the episode's sound, already encoded and checked for loudness, copied in.
+      + each layer at its time (kit videos come from 1080p copies made once, see kit.video_copy):
+        "normal" layers cover what's below and dissolve in and out; "screen" layers lighten it, as
+        Premiere's Screen mode does, so Nick's flame videos on black add only their flames
+      + the title graphic and the spectrum (Cutzo draws it frame by frame, spectrum.py, and feeds
+        it to FFmpeg as it goes)
+      + the fade to black at the end, then BT.709 video colours
+    with the episode's sound put in afterwards (see Cutzo._export_video).
 
-Long layers that fade are split into a fading start, a plain middle and a fading end, so FFmpeg
-only blends see-through pictures where it has to.
+Long normal layers that fade are split into a fading start, a plain middle and a fading end, so
+FFmpeg only blends see-through pictures where it has to. Still pictures are converted once and held.
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ from . import kit, render, spectrum as spectrumlib, titles
 FPS = "30000/1001"
 FPS_F = 30000 / 1001
 SPLIT_FADES_LONGER_THAN = 4.0  # seconds of plain picture worth a separate, non-blended part
-LOOP_STILLS = True  # pictures (title, spectrum colours) converted once and held, not re-read every frame
+FRAME_TB = "1001/30000"  # one tick = one frame
 
 KitVideo = Callable[[str, float], Path]  # (asset id, seconds needed from its start) -> 1080p copy
 
@@ -75,9 +78,11 @@ BT709 = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=
 
 
 def _parts(layer: render.Layer) -> list[tuple[float, float, float, float]]:
-    """(offset into the layer, length, fade in, fade out) pieces: fades kept apart from a long plain middle."""
+    """(offset into the layer, length, fade in, fade out) pieces: fades kept apart from a long plain middle.
+    Screen layers stay whole: they blend anyway, and their fades are just a change of brightness."""
     fi, fo, n = layer.fade_in, layer.fade_out, layer.length
-    if (fi <= 0 and fo <= 0) or n - fi - fo < SPLIT_FADES_LONGER_THAN or layer.kind == "title":
+    if (fi <= 0 and fo <= 0) or n - fi - fo < SPLIT_FADES_LONGER_THAN or layer.kind == "title" \
+            or layer.blend == "screen":
         return [(0.0, n, fi, fo)]
     out = []
     if fi > 0:
@@ -89,17 +94,17 @@ def _parts(layer: render.Layer) -> list[tuple[float, float, float, float]]:
 
 
 class Graph:
-    """FFmpeg inputs and a filter graph, built layer by layer."""
+    """FFmpeg inputs and a filter graph, built layer by layer, in planar RGB."""
 
     def __init__(self, total: float, width: int, height: int) -> None:
         self.total = total
         self.size = (width, height)
         # Kit videos are 1080p copies; another frame size (only in tests) scales them.
-        self.fit = "" if self.size == kit.VIDEO_SIZE else f",scale={width}:{height}"
+        self.fit = "" if self.size == kit.VIDEO_SIZE else f"{width}:{height}:"
         self.inputs: list[list[str]] = []
         self.filters: list[str] = []
         base = self.add(["-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:r={FPS}:d={total:.3f}"])
-        self.filters.append(f"[{base}:v]format=yuv420p,setsar=1[v0]")
+        self.filters.append(f"[{base}:v]format=gbrp,setsar=1[v0]")
         self.current = "v0"
         self._n = 0
 
@@ -111,77 +116,85 @@ class Graph:
         self._n += 1
         return f"{prefix}{self._n}"
 
+    def _rgb(self, alpha: bool) -> str:
+        """A kit video's frames (BT.709, TV range) to planar RGB, with a see-through channel when it fades."""
+        return f"scale={self.fit}in_color_matrix=bt709:in_range=tv,format={'gbrap' if alpha else 'gbrp'}"
+
     def overlay(self, chain: str, x: int = 0, y: int = 0) -> None:
         pic, out = self._label("l"), self._label("v")
         self.filters.append(f"{chain}[{pic}]")
-        self.filters.append(f"[{self.current}][{pic}]overlay=x={x}:y={y}:eof_action=pass:format=yuv420[{out}]")
+        self.filters.append(f"[{self.current}][{pic}]overlay=x={x}:y={y}:eof_action=pass:format=gbrp[{out}]")
+        self.current = out
+
+    def screen(self, chain: str) -> None:
+        """Lighten the picture so far with this layer (black changes nothing). Before the layer starts and
+        after it ends, the picture passes through."""
+        pic, out = self._label("l"), self._label("v")
+        self.filters.append(f"{chain}[{pic}]")
+        self.filters.append(f"[{self.current}][{pic}]blend=all_mode=screen:eof_action=pass[{out}]")
         self.current = out
 
     @staticmethod
-    def _fades(at: float, length: float, fi: float, fo: float) -> str:
+    def _fades(at: float, length: float, fi: float, fo: float, alpha: bool = True) -> str:
+        """Fades: of the see-through channel (a dissolve), or to and from black (for screen layers)."""
+        how = ":alpha=1" if alpha else ""
         out = ""
         if fi > 0:
-            out += f",fade=t=in:st={at:.4f}:d={fi:.4f}:alpha=1"
+            out += f",fade=t=in:st={at:.4f}:d={fi:.4f}{how}"
         if fo > 0:
-            out += f",fade=t=out:st={at + length - fo:.4f}:d={fo:.4f}:alpha=1"
+            out += f",fade=t=out:st={at + length - fo:.4f}:d={fo:.4f}{how}"
         return out
 
-    def video(self, src: Path, start: float, at: float, length: float, fi: float, fo: float) -> None:
-        k = self.add(["-threads", "2", "-ss", f"{start:.4f}", "-t", f"{length + 0.5:.4f}", "-i", str(src)])
-        chain = f"[{k}:v]trim=duration={length:.4f},setpts=PTS-STARTPTS+{at:.4f}/TB{self.fit}"
-        if fi > 0 or fo > 0:
-            chain += ",format=yuva420p" + self._fades(at, length, fi, fo)
-        self.overlay(chain)
+    def _place(self, chain: str, at: float, length: float, fi: float, fo: float, blend: str) -> None:
+        if blend == "screen":
+            self.screen(chain + self._fades(at, length, fi, fo, alpha=False))
+        else:
+            self.overlay(chain + self._fades(at, length, fi, fo))
 
-    def still(self, src: Path, start: float, at: float, length: float, fi: float, fo: float) -> None:
-        k = self.add(["-threads", "2", "-ss", f"{start:.4f}", "-i", str(src)])
-        chain = (f"[{k}:v]trim=end_frame=1,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={length:.4f},"
-                 f"trim=duration={length:.4f},setpts=PTS-STARTPTS+{at:.4f}/TB{self.fit}")
-        if fi > 0 or fo > 0:
-            chain += ",format=yuva420p" + self._fades(at, length, fi, fo)
-        self.overlay(chain)
+    def video(self, src: Path, start: float, at: float, length: float, fi: float, fo: float, *,
+              blend: str = "normal", speed: float = 1.0) -> None:
+        reach = length * speed
+        k = self.add(["-threads", "2", "-ss", f"{start:.4f}", "-t", f"{reach + 0.5:.4f}", "-i", str(src)])
+        chain = f"[{k}:v]trim=duration={reach:.4f},setpts=(PTS-STARTPTS)/{speed:.6f}+{at:.4f}/TB"
+        if speed != 1.0:
+            chain += f",fps={FPS}"  # faster than life: keep only the frames the video shows
+        fading = blend == "normal" and (fi > 0 or fo > 0)
+        self._place(f"{chain},{self._rgb(fading)}", at, length, fi, fo, blend)
 
     @staticmethod
-    def _held(index: int, frames: int, at: float = 0.0) -> str:
-        """A picture (an input opened with -framerate FPS, so one tick is one frame) turned into video
-        colours once, then shown for `frames` frames from the frame nearest `at`, instead of decoding
-        and converting the same picture again for every frame."""
-        return (f"[{index}:v]format=rgba,scale=out_color_matrix=bt709:out_range=tv,format=yuva420p,"
-                f"loop=loop={max(0, frames - 1)}:size=1:start=0,setpts=N+{round(at * FPS_F)}")
+    def _hold(frames: int, at: float) -> str:
+        """Show one converted frame for `frames` frames from the frame nearest `at`."""
+        return f"loop=loop={max(0, frames - 1)}:size=1:start=0,settb={FRAME_TB},setpts=N+{round(at * FPS_F)}"
+
+    def still(self, src: Path, start: float, at: float, length: float, fi: float, fo: float, *,
+              blend: str = "normal") -> None:
+        k = self.add(["-threads", "2", "-ss", f"{start:.4f}", "-i", str(src)])
+        fading = blend == "normal" and (fi > 0 or fo > 0)
+        chain = f"[{k}:v]trim=end_frame=1,{self._rgb(fading)},{self._hold(math.ceil(length * FPS_F), at)}"
+        self._place(chain, at, length, fi, fo, blend)
 
     def image(self, png: Path, x: int, y: int, at: float, length: float, fi: float, fo: float) -> None:
-        if not LOOP_STILLS:
-            k = self.add(["-loop", "1", "-framerate", FPS, "-t", f"{length:.4f}", "-i", str(png)])
-            chain = (f"[{k}:v]format=rgba,setpts=PTS-STARTPTS+{at:.4f}/TB{self._fades(at, length, fi, fo)},"
-                     "scale=out_color_matrix=bt709:out_range=tv,format=yuva420p")
-            self.overlay(chain, x, y)
-            return
+        """A see-through picture file (the title graphic), already in RGB."""
         k = self.add(["-framerate", FPS, "-i", str(png)])
-        self.overlay(self._held(k, math.ceil(length * FPS_F), at) + self._fades(at, length, fi, fo), x, y)
+        chain = f"[{k}:v]format=rgba,format=gbrap,{self._hold(math.ceil(length * FPS_F), at)}"
+        self.overlay(chain + self._fades(at, length, fi, fo), x, y)
 
     def spectrum(self, box: spectrumlib.Box, fill_png: Path, rim_png: Path) -> None:
         w, h = box.width, box.height
         k = self.add(["-f", "rawvideo", "-pix_fmt", "gray", "-video_size", f"{w}x{2 * h}", "-framerate", FPS,
                       "-i", "pipe:0"])
         self.filters += [f"[{k}:v]split=2[sa][sb]", f"[sa]crop={w}:{h}:0:0[fa]", f"[sb]crop={w}:{h}:0:{h}[ra]"]
-        if not LOOP_STILLS:
-            f = self.add(["-loop", "1", "-framerate", FPS, "-t", f"{self.total:.3f}", "-i", str(fill_png)])
-            r = self.add(["-loop", "1", "-framerate", FPS, "-t", f"{self.total:.3f}", "-i", str(rim_png)])
-            for colour, alpha in ((f, "fa"), (r, "ra")):
-                self.overlay(f"[{colour}:v]format=rgba[c{alpha}];[c{alpha}][{alpha}]alphamerge,"
-                             "scale=out_color_matrix=bt709:out_range=tv,format=yuva420p", box.x, box.y)
-            return
         frames = math.ceil(self.total * FPS_F) + 2
         for png, alpha in ((fill_png, "fa"), (rim_png, "ra")):
             colour = self.add(["-framerate", FPS, "-i", str(png)])
-            self.overlay(f"{self._held(colour, frames)}[c{alpha}];[c{alpha}][{alpha}]alphamerge", box.x, box.y)
+            self.overlay(f"[{colour}:v]format=rgb24,format=gbrap,{self._hold(frames, 0.0)}[c{alpha}];"
+                         f"[c{alpha}][{alpha}]alphamerge", box.x, box.y)
 
     def finish(self, fade_to_black: float) -> str:
-        if fade_to_black > 0:
-            self.filters.append(f"[{self.current}]fade=t=out:st={self.total - fade_to_black:.4f}:"
-                                f"d={fade_to_black:.4f},{BT709}[vout]")
-        else:
-            self.filters.append(f"[{self.current}]{BT709}[vout]")
+        fade = (f"fade=t=out:st={self.total - fade_to_black:.4f}:d={fade_to_black:.4f},"
+                if fade_to_black > 0 else "")
+        self.filters.append(f"[{self.current}]{fade}scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,"
+                            f"{BT709}[vout]")
         return ";".join(self.filters)
 
 
@@ -190,8 +203,7 @@ def needed(picture: render.Picture) -> dict[str, float]:
     out: dict[str, float] = {}
     for layer in picture.layers:
         if layer.kind in ("video", "still"):
-            reach = layer.start + (layer.length if layer.kind == "video" else 0.0) + 1.0
-            out[layer.src] = max(out.get(layer.src, 0.0), reach)
+            out[layer.src] = max(out.get(layer.src, 0.0), layer.reach + 1.0)
     return out
 
 
@@ -218,9 +230,10 @@ def render_video(plan: render.Plan, *, audio_path: Path | None, mix_path: Path, 
             if length <= 0.01:
                 continue
             if layer.kind == "video":
-                graph.video(kit_video(layer.src, layer.start + layer.length + 1.0), layer.start + offset, at, length, fi, fo)
+                graph.video(kit_video(layer.src, layer.reach + 1.0), layer.start + offset * layer.speed, at, length,
+                            fi, fo, blend=layer.blend, speed=layer.speed)
             elif layer.kind == "still":
-                graph.still(kit_video(layer.src, layer.start + 1.0), layer.start, at, length, fi, fo)
+                graph.still(kit_video(layer.src, layer.start + 1.0), layer.start, at, length, fi, fo, blend=layer.blend)
             elif layer.kind == "title" and title_box:
                 x, y, _, _ = title_box
                 graph.image(title_png, x, y, at, length, fi, fo)
