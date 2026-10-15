@@ -24,6 +24,8 @@ from . import audio, timeline
 
 XFADE = 0.012  # seconds of crossfade at every cut in the conversation
 PEAK_MARGIN = 2.0  # dB between the limiter and the true-peak limit (room for encoding overshoot)
+MAX_GAIN_TRIES = 3  # measuring passes to find the gain that lands on the loudness target after the limiter
+GAIN_CLOSE_ENOUGH = 0.1  # LU
 # Music dips under voices ("ducking"): it starts going down DUCK_ATTACK seconds before a voice comes
 # in, comes back up over DUCK_RELEASE seconds after it stops, and stays down across gaps shorter than
 # DUCK_JOIN seconds (so it doesn't bob between sentences).
@@ -257,11 +259,11 @@ def kept_ranges(duration: float, edits: list[dict[str, Any]]) -> list[tuple[floa
 
 def encode(mix_path: Path, dst: Path, spec: dict[str, Any], *, tags: dict[str, str], chapters: list[dict[str, Any]],
            total: float, check: Callable[[], None] | None = None, measured: dict[str, float] | None = None,
-           trim_db: float = 0.0, ceiling_db: float | None = None,
+           gain_db: float | None = None, ceiling_db: float | None = None,
            progress: Callable[[float, str], None] | None = None) -> dict[str, Any]:
     """Set the loudness (measure, one steady gain, peak limiter) and encode the stereo mix into the
-    finished file. `trim_db` nudges the gain when a first try came out a little off target;
-    `ceiling_db` (dBFS) lowers the limiter when encoding pushed the peaks over the limit."""
+    finished file. `gain_db` sets the gain outright (a second try, when the first came out a little
+    off target); `ceiling_db` (dBFS) lowers the limiter when encoding pushed the peaks over the limit."""
     def report(share: float, label: str) -> None:
         if progress:
             progress(share, label)
@@ -276,10 +278,28 @@ def encode(mix_path: Path, dst: Path, spec: dict[str, Any], *, tags: dict[str, s
     # One steady gain to reach the loudness target (no pumping), then a peak limiter that only
     # touches the loudest moments. MP3 and AAC encoding push peaks up again (by 1 to 2 dB on music
     # in tests), so the limiter sits PEAK_MARGIN under the limit; the check catches the rest.
-    gain = spec["loudness"] - measured["integrated"] + trim_db
     if ceiling_db is None:
         ceiling_db = spec["true_peak_max"] - PEAK_MARGIN
-    filters = f"volume={gain:.2f}dB,alimiter=limit={10 ** (ceiling_db / 20.0):.4f}:attack=5:release=60:level=false"
+
+    def chain(g: float) -> str:
+        return f"volume={g:.2f}dB,alimiter=limit={10 ** (ceiling_db / 20.0):.4f}:attack=5:release=60:level=false"
+
+    if gain_db is not None:
+        gain = gain_db
+    else:
+        # The limiter takes some loudness away (at YouTube's -14 LUFS enough for Spooky Sode's first
+        # encode to miss), so measure what gain plus limiter make and correct the gain before encoding:
+        # much quicker than encoding twice (AAC at 384 kbps runs at only about 9x real time). Encoding
+        # itself barely moves the loudness; the check afterwards still catches anything left.
+        gain = spec["loudness"] - measured["integrated"]
+        for _ in range(MAX_GAIN_TRIES):
+            report(0.4, "Setting the loudness")
+            out = ffmpeg.loudness(mix_path, channels=2, duration=total, check=check, filters=chain(gain), peak=False)
+            off = spec["loudness"] - out["integrated"]
+            if abs(off) <= GAIN_CLOSE_ENOUGH:
+                break
+            gain += off
+    filters = chain(gain)
     args = [*ffmpeg.raw_input_args(mix_path, 2), "-i", str(meta), "-map", "0:a", "-map_metadata", "1",
             "-map_chapters", "1", "-af", filters, "-ac", str(spec["channels"]), "-ar", str(spec["rate"])]
     if spec["codec"] == "mp3":

@@ -1412,7 +1412,9 @@ class Cutzo:
         if abs(off) > 0.3 or over > 0:
             ceiling = made["ceiling_db"] - (over + 0.5 if over > 0 else 0.0)
             made = render.encode(mix_path, dst, spec, tags=tags, chapters=layout.chapters, total=layout.total,
-                                 check=check, measured=made["before"], trim_db=off, ceiling_db=ceiling,
+                                 check=check, measured=made["before"], ceiling_db=ceiling,
+                                 # a lower limiter: find the gain again; otherwise just correct it
+                                 gain_db=None if over > 0 else made["gain_db"] + off,
                                  progress=lambda p, text: step("Fine-tuning the loudness", 0.7 + 0.2 * p))
             step(f"Checking {label} again", 0.92, "ffprobe and a loudness scan")
             checked = render.check_file(dst, spec, check=check)

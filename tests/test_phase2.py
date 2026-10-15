@@ -306,6 +306,27 @@ def test_encode_keeps_peaks_under_the_limiter_ceiling(tmp_path):
     assert render.check_file(dst, spec)["loudness"]["true_peak"] < -3.0
 
 
+@needs_ffmpeg
+def test_encode_lands_on_the_loudness_target_even_when_the_limiter_works_hard(tmp_path):
+    """The limiter takes loudness away from peaky sound; the gain is corrected before encoding,
+    so one encode is enough (Spooky Sode's first 14-minute AAC encode missed and had to be redone)."""
+    from cutzo.core import presets
+
+    spec = presets.get_preset("youtube-1080p")["spec"]
+    rng = np.random.default_rng(3)
+    t = np.arange(RATE * 12) / RATE
+    x = 0.05 * np.sin(2 * np.pi * 150 * t) * (np.sin(2 * np.pi * 2 * t) > 0) + 0.02 * rng.normal(size=len(t))
+    x[:: RATE // 10] += 0.95  # sharp clicks far above the loudness
+    mix = audio.write_f32(tmp_path / "mix.f32", np.stack([x, x], 1).astype(np.float32))
+    dst = tmp_path / "out.m4a"
+    made = render.encode(mix, dst, spec, tags={"title": "t"}, chapters=[], total=12.0)
+    plain = spec["loudness"] - made["before"]["integrated"]
+    assert made["gain_db"] > plain + 2.0  # the limiter's loss was made up
+    checked = render.check_file(dst, spec)
+    assert abs(checked["loudness"]["integrated"] - spec["loudness"]) <= 0.2
+    assert checked["loudness"]["true_peak"] <= spec["true_peak_max"]
+
+
 # ------------------------------------------------------------- kit copies
 @needs_ffmpeg
 def test_kit_local_copy_refreshes_when_drive_changes(tmp_path):

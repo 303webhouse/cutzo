@@ -233,18 +233,23 @@ _SUMMARY = {
 
 
 def loudness(src: Path, *, channels: int = 1, duration: float | None = None, progress: Progress | None = None,
-             check: Check | None = None) -> dict[str, float]:
+             check: Check | None = None, filters: str | None = None, peak: bool = True) -> dict[str, float]:
     """EBU R128 measurement: integrated loudness (LUFS), true peak (dBTP), loudness range (LU).
+    `filters` run first (to measure what a gain and limiter would make, without encoding anything);
+    peak=False skips the true peak, which is slower to find.
 
     Uses FFmpeg's ebur128 meter, which reads the summary to one decimal and runs about seven times
     faster than loudnorm's (measured on a 90-minute episode: 20 s against 137 s, same results)."""
     args = raw_input_args(src, channels) if src.suffix.lower() == ".f32" else ["-i", str(src)]
-    args += ["-vn", "-af", "ebur128=peak=true:framelog=quiet", "-f", "null", "-"]
+    meter = f"ebur128=peak={'true' if peak else 'none'}:framelog=quiet"
+    args += ["-vn", "-af", f"{filters},{meter}" if filters else meter, "-f", "null", "-"]
     lines = run(args, duration=duration, progress=progress, check=check, keep_lines=40)
     text = "\n".join(lines)
     summary = text[text.rfind("Summary:"):] if "Summary:" in text else ""
     out: dict[str, float] = {}
     for key, pattern in _SUMMARY.items():
+        if key == "true_peak" and not peak:
+            continue
         found = pattern.search(summary)
         if not found:
             raise CutzoError("FFmpeg didn't report the loudness.", data={"ffmpeg": lines[-12:]})
