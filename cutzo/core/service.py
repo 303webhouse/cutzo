@@ -1421,8 +1421,10 @@ class Cutzo:
     def _export_video(self, ep: dict[str, Any], layout: render.Plan, item: dict[str, Any], spec: dict[str, Any],
                       dst: Path, *, mix_path: Path, talk: float, kit_dir: Path, work_dir: Path, tags: dict[str, str],
                       step, check) -> tuple[dict[str, Any], dict[str, Any], float]:
-        """The finished video: 1080p copies of the kit videos (first time only), the sound (encoded and
-        checked first), then the picture with the sound copied in, then the checks."""
+        """The finished video: 1080p copies of the kit videos (first time only); then the picture is drawn
+        while the sound is encoded and checked beside it (AAC at 384 kbps runs at only about 9x real
+        time on one processor core, so a 2-hour episode's sound takes about 14 minutes); then the
+        sound goes in and the file is checked."""
         work_dir.mkdir(parents=True, exist_ok=True)
         needs = videolib.needed(layout.picture) if layout.picture else {}
         for k, (asset_id, until) in enumerate(sorted(needs.items())):
@@ -1433,20 +1435,59 @@ class Cutzo:
                            progress=lambda p, k=k, name=name: step("Preparing the show's videos",
                                                                    0.02 + 0.13 * (k + p) / max(1, len(needs)),
                                                                    f"{name} at 1080p (only the first time)"))
-        sound = work_dir / "video-sound.m4a"
-        made, sound_check = self._encode_checked(
-            mix_path, sound, spec, tags=tags, layout=layout, label="the sound",
-            step=lambda text, share, detail=None: step(text if "Check" not in text else "Checking the sound",
-                                                       0.15 + 0.05 * share, detail),
-            check=check)
-        step("Drawing the video", 0.2, "Background, montage, title graphic and spectrum, frame by frame")
-        videolib.render_video(
-            layout, audio_path=sound, mix_path=mix_path, talk_lufs=talk, dst=dst, video=spec["video"],
-            kit_video=lambda asset_id, until: kit.video_copy(asset_id, kit_dir=kit_dir, drive=self.drive, until=until,
-                                                            check=check),
-            title_lines=titles.lines_for(ep), work_dir=work_dir, check=check,
-            progress=lambda p: step("Drawing the video", 0.2 + 0.76 * p,
-                                    "Background, montage, title graphic and spectrum, frame by frame"))
+        sound, picture = work_dir / "video-sound.m4a", work_dir / "picture.mp4"
+        stop = threading.Event()
+        done: dict[str, Any] = {}
+
+        def stop_check() -> None:
+            if stop.is_set():
+                raise CutzoError("Stopped because drawing the video failed.")
+            if check:
+                check()
+
+        def encode_sound() -> None:
+            try:
+                done["made"], done["check"] = self._encode_checked(
+                    mix_path, sound, spec, tags=tags, layout=layout, label="the sound",
+                    step=lambda *args, **kwargs: None, check=stop_check)
+            except BaseException as exc:  # noqa: BLE001 - handed over to the job below
+                done["error"] = exc
+
+        worker = threading.Thread(target=encode_sound, name="video-sound", daemon=True)
+        worker.start()
+        drawing = "Background, montage, title graphic and spectrum, frame by frame (the sound is encoded alongside)"
+        step("Drawing the video", 0.15, drawing)
+        try:
+            videolib.render_video(
+                layout, audio_path=None, mix_path=mix_path, talk_lufs=talk, dst=picture, video=spec["video"],
+                kit_video=lambda asset_id, until: kit.video_copy(asset_id, kit_dir=kit_dir, drive=self.drive,
+                                                                until=until, check=check),
+                title_lines=titles.lines_for(ep), work_dir=work_dir, check=check, faststart=False,
+                progress=lambda p: step("Drawing the video", 0.15 + 0.78 * p, drawing))
+        except BaseException:
+            stop.set()
+            raise
+        finally:
+            if stop.is_set():
+                worker.join()
+        if worker.is_alive():
+            step("Finishing the sound", 0.93, "Encoding the sound for the video")
+            try:
+                while worker.is_alive():
+                    worker.join(0.5)
+                    if check:
+                        check()
+            except BaseException:
+                stop.set()
+                worker.join()
+                raise
+        if "error" in done:
+            raise done["error"]
+        made, sound_check = done["made"], done["check"]
+        step("Putting the sound in", 0.95, "Copying the picture and the sound into the finished file")
+        videolib.mux(picture, sound, dst, total=layout.total, check=check,
+                     progress=lambda p: step("Putting the sound in", 0.95 + 0.02 * p))
+        picture.unlink(missing_ok=True)
         step(f"Checking {item['label']}", 0.97, "ffprobe and the sound's loudness")
         checked = videolib.check_video(dst, spec, audio_loudness=sound_check["loudness"],
                                        expected_seconds=layout.total, check=check)

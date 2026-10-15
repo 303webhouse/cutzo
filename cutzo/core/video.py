@@ -167,10 +167,12 @@ def needed(picture: render.Picture) -> dict[str, float]:
     return out
 
 
-def render_video(plan: render.Plan, *, audio_path: Path, mix_path: Path, talk_lufs: float, dst: Path,
+def render_video(plan: render.Plan, *, audio_path: Path | None, mix_path: Path, talk_lufs: float, dst: Path,
                  video: dict[str, Any], kit_video: KitVideo, title_lines: dict[str, str], work_dir: Path,
-                 check: Callable[[], None] | None = None, progress: Callable[[float], None] | None = None) -> None:
-    """Compose and encode the finished video (MP4) with the sound from `audio_path` copied in."""
+                 check: Callable[[], None] | None = None, progress: Callable[[float], None] | None = None,
+                 faststart: bool = True) -> None:
+    """Compose and encode the finished video (MP4) with the sound from `audio_path` copied in, or the
+    picture alone when `audio_path` is None (the sound goes in afterwards with `mux`)."""
     picture = plan.picture
     if picture is None:
         raise ValueError("This plan has no picture.")
@@ -209,17 +211,39 @@ def render_video(plan: render.Plan, *, audio_path: Path, mix_path: Path, talk_lu
             for chunk in drawer.frames(sound, frames, visible, check=check):
                 pipe.write(chunk)
 
-    audio = graph.add(["-i", str(audio_path)])
+    audio = graph.add(["-i", str(audio_path)]) if audio_path else None
     script = graph.finish(picture.fade_to_black)
     inputs = [arg for group in graph.inputs for arg in group]
     tmp = dst.with_name(dst.stem + ".part" + dst.suffix)
-    # The sound's tags (title, show) come along; its chapters don't (YouTube reads chapters from the
-    # description, and a chapter track only confuses some players).
-    args = [*inputs, "-filter_complex", script, "-map", "[vout]", "-map", f"{audio}:a", "-c:a", "copy",
-            "-map_metadata", str(audio), "-map_chapters", "-1",
-            *encoder_args(video), "-t", f"{total:.3f}", "-movflags", "+faststart", "-f", "mp4", str(tmp)]
+    args = [*inputs, "-filter_complex", script, "-map", "[vout]"]
+    if audio is not None:
+        args += ["-map", f"{audio}:a", *_sound_args(audio)]
+    else:
+        args += ["-an"]
+    args += [*encoder_args(video), "-t", f"{total:.3f}", *(["-movflags", "+faststart"] if faststart else []),
+             "-f", "mp4", str(tmp)]
     try:
         ffmpeg.run(args, duration=total, progress=progress, check=check, feed=feed)
+        tmp.replace(dst)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _sound_args(index: int) -> list[str]:
+    # The sound is copied as it is. Its tags (title, show) come along; its chapters don't (YouTube reads
+    # chapters from the description, and a chapter track only confuses some players).
+    return ["-c:a", "copy", "-map_metadata", str(index), "-map_chapters", "-1"]
+
+
+def mux(picture: Path, sound: Path, dst: Path, *, total: float, check: Callable[[], None] | None = None,
+        progress: Callable[[float], None] | None = None) -> None:
+    """The finished video: the picture with the sound put in, both copied as they are, index at the
+    front. (The sound is encoded while the picture is drawn, see Cutzo._export_video.)"""
+    tmp = dst.with_name(dst.stem + ".part" + dst.suffix)
+    args = ["-i", str(picture), "-i", str(sound), "-map", "0:v", "-map", "1:a", "-c:v", "copy", *_sound_args(1),
+            "-t", f"{total:.3f}", "-movflags", "+faststart", "-f", "mp4", str(tmp)]
+    try:
+        ffmpeg.run(args, duration=total, progress=progress, check=check)
         tmp.replace(dst)
     finally:
         tmp.unlink(missing_ok=True)
