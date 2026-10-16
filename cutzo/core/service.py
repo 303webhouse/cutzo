@@ -1760,6 +1760,22 @@ class Cutzo:
             self._save(ep)
         return measured
 
+    EXPORT_TYPES = {".mp4": "video/mp4", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac",
+                    ".wav": "audio/wav"}
+
+    def export_file(self, episode: str, target: str) -> tuple[Path, str]:
+        """A finished export (by its target, e.g. youtube-1080p) and its media type, to play in the app."""
+        ep = self._load(self.resolve_episode(episode))
+        x = next((e for e in ep.get("exports", []) if e["target"] == target and e.get("written")), None)
+        if not x:
+            raise NotFound(f"This episode has no finished {target} export to play.", hint="Export it first.")
+        path = Path(x["file"])
+        if not self.guard.is_writable(path):  # only Cutzo's own files, never anything else on the PC
+            raise NotFound("Cutzo only plays files from its own exports folder.")
+        if not path.exists():
+            raise NotFound(f"The finished file isn't there any more ({path}).", hint="Export it again.")
+        return path, self.EXPORT_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
     def reveal(self, file: str) -> dict[str, Any]:
         """Show a finished export in File Explorer (only files inside Cutzo's library)."""
         path = Path(str(file).strip().strip('"'))

@@ -572,6 +572,18 @@ def test_extras_in_a_real_episode(heretics, tmp_path):
     # The test's pure tones are so simple that AAC spends few bits on them; real sound doesn't do that.
     assert all(r["rule"] == "Bitrate" and "kbps" in r["found"] for r in failed), failed
     assert x["layout"]["pieces"]["Extra"] == 3 and x["layout"]["picture"]["layers"]["Extra video"] == 1
+    # The finished video plays on the Export tab: the engine streams it, with seeking (range requests).
+    path, kind = app.export_file(ep_id, "youtube-1080p")
+    assert kind == "video/mp4" and path == Path(x["file"])
+    with pytest.raises(NotFound):
+        app.export_file(ep_id, "podcast-mp3")  # not exported in this test
+    from fastapi.testclient import TestClient
+
+    from cutzo.engine import create_app
+
+    with TestClient(create_app(app, extra_hosts=("testserver",))) as client:
+        part = client.get(f"/api/episodes/{ep_id}/exports/youtube-1080p/file", headers={"Range": "bytes=0-99"})
+        assert part.status_code == 206 and len(part.content) == 100 and part.headers["content-type"] == "video/mp4"
     copies = app.library / "episodes" / ep_id / "inserts"
     vid = video_extra["extra"]["id"]
     assert (copies / f"{vid}.f32").exists() and (copies / f"{vid}-1080p.mp4").exists()

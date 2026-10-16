@@ -83,9 +83,11 @@ export function mountReview(container, initialEp, ctx) {
   const selbar = h("div", { class: "selbar" });
   const deck = h("section", { class: "deck", "aria-label": "Player" },
     h("div", {}, h("div", { class: "preview" }, preview),
-      h("p", { class: "preview-note" }, real
-        ? "Audio only: the picture moves with the sound while you listen."
-        : "Sample preview: pretend data, nothing is rendered.")),
+      h("p", { class: "preview-note" }, !real
+        ? "Sample preview: pretend data, nothing is rendered."
+        : ep.has_picture
+          ? "A quick sketch that moves with the sound. The real video is drawn when you export; watch it on the Export tab."
+          : "Audio only: the picture moves with the sound while you listen.")),
     h("div", {},
       h("div", { class: "transport" }, playBtn, clock, finalLen,
         ep.has_original ? h("label", { class: "switch", title: "Compare with the recording before cleanup" }, original, "Hear the original") : null,

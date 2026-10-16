@@ -26,7 +26,7 @@ export async function render(main, params, ctx) {
   let review = null;
   let destroyed = false;
   // Things you are in the middle of typing or choosing survive live refreshes.
-  const draft = { paths: "", picks: null, confirm: null };
+  const draft = { paths: "", picks: null, confirm: null, player: null };
 
   const view = {
     async refresh() {
@@ -429,6 +429,7 @@ export async function render(main, params, ctx) {
             x.written ? h("button", {
               class: "btn btn-quiet btn-small", style: { marginLeft: "8px" }, onclick: () => reveal(x.file),
             }, "Show in folder") : null),
+          x.written ? playerFor(x) : null,
           h("p", { class: "small muted" }, x.written
             ? `${relTime(x.at)}. ${x.final_length} long, ${fmtSize((x.bytes || 0) / 1e9)}.`
             : `${relTime(x.at)}. ${x.final_length} long, ${fmtSize(x.estimated_gb)}. Not written: sample episode.`),
@@ -441,6 +442,33 @@ export async function render(main, params, ctx) {
           x.check.note ? h("p", { class: "small muted", style: { marginTop: "10px" } }, x.check.note) : null));
       }
     }
+  }
+
+  // A finished file, played right here: the engine streams it from Cutzo's exports folder. If the tab
+  // redraws while it plays (a change made elsewhere), the player comes back at the same moment, paused.
+  function playerFor(x) {
+    if (!/\.(mp4|mp3|m4a|aac|wav)$/i.test(x.file)) return null;
+    const video = /\.mp4$/i.test(x.file);
+    const box = h("div", { class: "player-box" });
+    const open = (time, autoplay) => {
+      clear(box);
+      draft.player = { target: x.target, at: x.at, time };
+      const src = `${epPath(ep.id)}/exports/${encodeURIComponent(x.target)}/file?v=${encodeURIComponent(x.at)}`
+        + (time > 0 ? `#t=${time.toFixed(1)}` : "");
+      const el = h(video ? "video" : "audio", { controls: true, preload: "metadata", autoplay, src,
+        class: video ? "export-video" : "export-audio", "aria-label": `${x.label}, finished file` });
+      el.addEventListener("timeupdate", () => {
+        if (draft.player && draft.player.target === x.target) draft.player.time = el.currentTime;
+      });
+      box.append(el);
+    };
+    if (draft.player && draft.player.target === x.target && draft.player.at === x.at) open(draft.player.time, false);
+    else {
+      const start = h("button", { class: "btn btn-small", svg: icons.play, onclick: () => open(0, true) });
+      start.append(video ? "Watch it here" : "Listen here");
+      box.append(start);
+    }
+    return box;
   }
 
   function describeProbe(pr) {

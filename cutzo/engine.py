@@ -357,6 +357,12 @@ def create_app(cutzo: Cutzo, *, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     def reveal(body: RevealBody):
         return cutzo.reveal(body.file)
 
+    @app.get("/api/episodes/{episode}/exports/{target}/file")
+    def export_file(episode: str, target: str):
+        # A finished export, played on the Export tab (FileResponse answers range requests, so seeking works)
+        path, media_type = cutzo.export_file(episode, target)
+        return FileResponse(path, media_type=media_type)
+
     # ------------------------------------------------------------- jobs
     @app.get("/api/jobs")
     def jobs(active: bool = False, limit: int = 30):
