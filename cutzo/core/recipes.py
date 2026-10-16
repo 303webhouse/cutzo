@@ -84,7 +84,8 @@ THE_DIG: dict[str, Any] = {
 #   Breaks   before each chapter marked as a new segment: a music cue fades in under the last
 #            seconds of talk (title and spectrum fade out, break visuals fade in), plays to its end,
 #            a page flip, and the talk comes back with the title and spectrum.
-#   Ending   the ending music fades in under the last minute of talk with the break visuals, then
+#   Ending   the ending music fades in under the last minute of talk with the break visuals; as the
+#            talk ends, the montage's opening frame (the red scene, no show name) takes over, then
 #            Full Flames under the sign-off picks, the music staying low under them, and the picture
 #            fades to black as the music ends.
 NEW_HERETICS: dict[str, Any] = {
@@ -94,8 +95,9 @@ NEW_HERETICS: dict[str, Any] = {
     "talk_reference_lufs": -16.0,
     "teaser": {"at": 1.5, "gain_db": 1.8, "spectrum_early": 0.37, "spectrum_fade_in": 1.87},
     "montage": {"music_at": 1.888, "talk_at": 83.684, "title_at": 91.191, "background_at": 93.36,
-                "gain_db": -5.3, "spectrum_early": 0.3},
-    # Under the talk Nick holds the montage's last frame (the red scene with the show's name) and screens
+                "gain_db": -5.3, "spectrum_early": 0.3, "held_frame": 87.354},
+    # Under the talk Nick holds the montage's frame at 87.354 s (the red scene with the show's name: his
+    # Premiere project's frame holds, read Oct 15, 2026; the last frame, 95 s in, differs a little) and screens
     # the fire loop over it at 2.03x speed (4275 s of the loop in 2104.5 s), so it flares about once a
     # minute; the break visuals and Full Flames are screened too (measured against JW Ghost Stories).
     "background_speed": 4275.086 / 2104.50,
@@ -123,8 +125,9 @@ NEW_HERETICS: dict[str, Any] = {
                "visuals_until": 15.6, "flames_at": 15.115, "flames_start": 5.339, "flames_fade_in": 0.5,
                "signoff_at": 18.452, "signoff_gain_db": 0.5, "fade_to_black": 31.966, "after_signoff": 3.0,
                "no_signoff": 40.0, "no_signoff_fade": 8.0, "title_early": 0.2,
-               # the montage plays again under the ending visuals and Full Flames
-               "montage_again_at": -0.834, "montage_again_start": 1.034, "montage_again_fade_in": 1.0},
+               # under the ending visuals and Full Flames: the montage's opening frame (0.434 s in, before
+               # any footage or the show's name), held, dissolving in just before the talk ends
+               "backdrop_at": -0.834, "backdrop_frame": 0.434, "backdrop_fade_in": 1.0},
     "flip_level_lu": -12.9,  # another transition sound: this far below the talk (the page flip's level)
     "loop_fade": 1.0,  # a background loop that runs out starts again with this long a dissolve
 }
@@ -426,9 +429,9 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
     titles.append((title_from, talk_end, title_in, max(0.5, end_lead - E["title_early"])))
     spectrum.append((spectrum_from, talk_end, recipe["fade_back"], end_lead))
     if montage != "none":
-        again = talk_end + E["montage_again_at"]
-        pic.layers.append(render.Layer("video", montage, at=again, length=end - again, start=E["montage_again_start"],
-                                       fade_in=E["montage_again_fade_in"], label="Montage again"))
+        backdrop = talk_end + E["backdrop_at"]
+        pic.layers.append(render.Layer("still", montage, at=backdrop, length=end - backdrop, start=E["backdrop_frame"],
+                                       fade_in=E["backdrop_fade_in"], label="Ending backdrop"))
     if break_visuals != "none":
         vis_at = talk_end - end_lead + E["visuals_late"]
         pic.layers.append(render.Layer("video", break_visuals, at=vis_at, length=talk_end + E["visuals_until"] - vis_at,
@@ -449,7 +452,7 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
         mlen = length_of(montage)
         under.append(render.Layer("video", montage, at=m, length=mlen, label="Opening montage"))
         under.append(render.Layer("still", montage, at=m + mlen, length=max(0.0, end - (m + mlen)),
-                                  start=max(0.0, mlen - 0.1), label="Held title card"))
+                                  start=min(M["held_frame"], max(0.0, mlen - 0.1)), label="Held title card"))
         plan.pieces.append(render.Piece(src=kit_file(montage), channels=2, start=0.0, end=mlen, at=m,
                                         gain_db=M["gain_db"] + kit_offset, kind="music", label="Opening montage"))
         bg_from = m + M["background_at"]

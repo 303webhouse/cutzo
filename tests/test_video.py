@@ -62,19 +62,21 @@ def test_new_heretics_layout_follows_spooky_sode():
         layers[layer.label].append(layer)
     assert layers["Opening still"][0].at == 0 and layers["Opening still"][0].until == pytest.approx(montage.at)
     assert layers["Background"][0].at == pytest.approx(montage.at + 93.36)
-    # Under the talk: the montage's last frame, held, with the fire loop screened over it at 2.03x speed
-    # (4275 s of loop per 2104.5 s), so a 2-hour episode runs it four times, as in Nick's project.
+    # Under the talk: the montage's frame at 87.354 s (Nick's frame hold), with the fire loop screened over
+    # it at 2.03x speed (4275 s of loop per 2104.5 s), so a 2-hour episode runs it four times, as in his project.
     held = layers["Held title card"][0]
-    assert held.kind == "still" and held.at == pytest.approx(montage.until) and held.start > 94.9
+    assert held.kind == "still" and held.at == pytest.approx(montage.until) and held.start == 87.354
     loop = layers["Background"]
     assert len(loop) == 4 and all(x.blend == "screen" for x in loop)
     assert loop[0].speed == pytest.approx(2.0314, abs=1e-4) and loop[0].length == pytest.approx(2104.5, abs=0.1)
     assert loop[1].fade_in == 1.0 and loop[0].fade_out == 1.0  # one run dissolves into the next
     assert all(x.blend == "screen" for x in layers["Break visuals"] + layers["Ending visuals"])
-    again = layers["Montage again"][0]  # the montage plays again under the ending visuals and Full Flames
-    assert again.blend == "normal" and again.at == pytest.approx(plan.talk_end - 0.834) and again.start == 1.034
+    # Under the ending visuals and Full Flames: the montage's opening frame, held (no footage, no show name).
+    backdrop = layers["Ending backdrop"][0]
+    assert backdrop.kind == "still" and backdrop.blend == "normal" and backdrop.start == 0.434
+    assert backdrop.at == pytest.approx(plan.talk_end - 0.834) and backdrop.until == pytest.approx(plan.total)
     order = [layer.label for layer in plan.picture.layers]
-    assert order.index("Montage again") < max(i for i, label in enumerate(order) if label == "Ending visuals")
+    assert order.index("Ending backdrop") < max(i for i, label in enumerate(order) if label == "Ending visuals")
     assert layers["Episode title"][0].at == pytest.approx(montage.at + 91.191)
     # Breaks: the cue fades in under the last seconds of talk, plays to its end, a page flip, then talk.
     music = by("Break music")
