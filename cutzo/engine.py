@@ -131,6 +131,17 @@ class PickBody(BaseModel):
     end: TimeValue
 
 
+class ExtraBody(BaseModel):
+    file: str
+    time: TimeValue | None = None
+    chapter: str | None = None
+    kind: str | None = None
+    start: TimeValue | None = None
+    end: TimeValue | None = None
+    gain_db: float | None = None
+    label: str | None = None
+
+
 class RevealBody(BaseModel):
     file: str
 
@@ -283,6 +294,15 @@ def create_app(cutzo: Cutzo, *, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     @app.delete("/api/episodes/{episode}/picks/{pick_id}")
     def remove_pick(episode: str, pick_id: str, request: Request):
         return cutzo.remove_pick(episode, pick_id, source=source_of(request))
+
+    @app.post("/api/episodes/{episode}/extras")
+    def add_extra(episode: str, body: ExtraBody, request: Request):
+        return cutzo.add_insert(episode, body.file, body.time, body.chapter, body.kind, body.start, body.end,
+                                body.gain_db, body.label, source=source_of(request))
+
+    @app.delete("/api/episodes/{episode}/extras/{insert_id}")
+    def remove_extra(episode: str, insert_id: str, request: Request):
+        return cutzo.remove_insert(episode, insert_id, source=source_of(request))
 
     @app.post("/api/episodes/{episode}/cuts")
     def cut_section(episode: str, body: CutBody, request: Request):

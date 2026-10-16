@@ -15,7 +15,7 @@ EXPECTED_TOOLS = {
     "job_status", "get_transcript", "cut_section", "cut_words", "restore_cut", "undo_last_change",
     "set_camera", "add_chapter", "swap_asset", "list_assets", "export", "check_export",
     "get_activity_log", "show_in_cutzo", "add_highlight", "remove_highlight", "set_dead_air",
-    "set_voice_strength", "transcribe_episode", "mark_segment", "set_title_graphic",
+    "set_voice_strength", "transcribe_episode", "mark_segment", "set_title_graphic", "add_extra", "remove_extra",
 }
 
 

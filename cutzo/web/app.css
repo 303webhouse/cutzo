@@ -435,6 +435,15 @@ p { margin: 0 0 10px; }
 .add-chapter input { padding: 8px 10px; }
 .seg-toggle { display: flex; align-items: center; gap: 6px; margin-top: 6px; color: var(--ink-soft); cursor: pointer; }
 .seg-toggle input { accent-color: var(--ink); }
+.item-text.item-wrap { white-space: normal; }
+#extras-side .field { margin: 10px 0 0; font-weight: 600; }
+#extras-side .field input, #extras-side .field select { padding: 8px 10px; font-weight: 400; }
+#extras-side .where { display: grid; grid-template-columns: minmax(0, 1fr) 84px; gap: 8px; }
+#extras-side .where.no-time { grid-template-columns: minmax(0, 1fr); }
+#extras-side .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+#extras-side details { margin-top: 10px; }
+#extras-side summary { cursor: pointer; font-weight: 700; font-size: var(--s-1); padding: 6px 0; }
+#extras-side .btn { margin-top: 12px; }
 #title-graphic .field { margin: 10px 0 0; font-weight: 600; }
 #title-graphic .field input { padding: 8px 10px; font-weight: 400; }
 #title-graphic .btn { margin-top: 12px; }

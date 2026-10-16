@@ -54,6 +54,9 @@ How to work:
   title graphic (set_title_graphic) and the audio spectrum, then the ending music and Full Flames under
   the sign-off picks. Every chapter is a new topic (a page flip in a short pause); chapters marked as
   a new segment (add_chapter new_segment=true, or mark_segment) get a music break before them instead.
+- Extras (add_extra) are one-off sounds or videos for one episode, like the spooky haiku in Spooky
+  Sode's first break: a file on Nick's PC or a show-kit item, at a time in the recording (the talk
+  pauses there) or at a chapter (it plays in that chapter's break, before the page flip or stinger).
 - Long jobs (import_media, build_episode, transcribe_episode, export) return a job id at once; poll
   job_status. Building a 90-minute episode takes about 15 minutes, transcribing alone about 4.
 - Every change is logged as "Claude" and shows up live in Cutzo's window. undo_last_change
@@ -256,6 +259,9 @@ def get_episode(
                       for p in (e.get("picks") or {}).get("cold_open", [])] or None,
         "sign_off": [{"id": p["id"], "from": p["start_text"], "to": p["end_text"]}
                      for p in (e.get("picks") or {}).get("outro", [])] or None,
+        "extras": [{"id": x["id"], "what": x["label"], "kind": x["kind_label"], "where": x["where"],
+                    "length": x["length_text"], "part_of_file": x.get("part"), "source": x["source"],
+                    "level_change_db": x.get("gain_db") or None} for x in e.get("inserts") or []] or None,
         "build_notes": e.get("build_notes") or None,
         "last_change": e.get("last_change"),
         "note": e.get("note"),
@@ -461,6 +467,48 @@ def remove_highlight(
 ) -> dict[str, Any]:
     """Take a stretch out of the cold open or sign-off."""
     res = engine.call("DELETE", _ep(episode) + "/picks/" + urllib.parse.quote(highlight_id.strip(), safe=""))
+    return {"done": res["summary"]}
+
+
+@server.tool(annotations=CHANGE, structured_output=False)
+def add_extra(
+    episode: Episode,
+    file: Annotated[str, Field(description="Full path of a sound or video file on Nick's PC (e.g. 'G:\\My Drive\\The New "
+                                           "Heretics\\Podcast\\Episodes\\Spooky Sode\\Spooky Haiku.wav'), or a show-kit "
+                                           "item's name or id from list_assets (e.g. 'Haiku Intro', '93696').")],
+    at: Annotated[Union[str, float, None], Field(description="Where the talk pauses for it: a time in the ORIGINAL "
+                                                             "recording, like '41:20'. Leave out when giving a chapter.")] = None,
+    chapter: Annotated[str | None, Field(description="Or: a chapter's id or title. The extra then plays in that chapter's "
+                                                     "pause or music break, after the break music, before the page flip "
+                                                     "or stinger.")] = None,
+    kind: Annotated[str | None, Field(description="'spoken' (a voice: as loud as the talk, the spectrum shows it), "
+                                                  "'music' (a bit below the talk, break visuals on The New Heretics), or "
+                                                  "'video' (its picture fills the frame). Left out: Cutzo guesses from the file.")] = None,
+    start: Annotated[Union[str, float, None], Field(description="Use only part of the file: from this time in the FILE "
+                                                                "(seconds or '0:03.4').")] = None,
+    end: Annotated[Union[str, float, None], Field(description="...to this time in the file.")] = None,
+    level_db: Annotated[float | None, Field(description="Make it louder or softer than Cutzo's automatic level, in dB "
+                                                        "(-20 to 20).")] = None,
+    label: Annotated[str | None, Field(description="A short name for it (defaults to the file's name).")] = None,
+) -> dict[str, Any]:
+    """Add an extra: a one-off sound or video for this episode only (like the spooky haiku in Spooky Sode's
+    first break). The talk pauses where it goes; several extras at the same spot play one after another,
+    in the order added. Remove with remove_extra; undo_last_change works too."""
+    res = engine.call("POST", _ep(episode) + "/extras", {"file": file, "time": at, "chapter": chapter, "kind": kind,
+                                                         "start": start, "end": end, "gain_db": level_db, "label": label})
+    out = {"done": res["summary"], "id": res["extra"]["id"]}
+    if res.get("finished_length"):
+        out["finished_length_now"] = res["finished_length"]
+    return out
+
+
+@server.tool(annotations=CHANGE, structured_output=False)
+def remove_extra(
+    episode: Episode,
+    extra_id: Annotated[str, Field(description="The id from get_episode's extras list, like 'i12'.")],
+) -> dict[str, Any]:
+    """Take an extra out of the episode."""
+    res = engine.call("DELETE", _ep(episode) + "/extras/" + urllib.parse.quote(extra_id.strip(), safe=""))
     return {"done": res["summary"]}
 
 

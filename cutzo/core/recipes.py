@@ -18,10 +18,17 @@ Changed after Nick heard the first rebuild (Oct 14, 2026): voices over the intro
 were a bit too low. The theme now dips 5 dB whenever someone talks over it ("duck_db"), the cold
 open and sign-off clips are 1.5 dB louder, and the ending theme is 3 dB softer. Measured on Season
 Debrief Part 2, voices went from 6 LU (cold open) and 1 LU (sign-off) above the music to 12 and 10.
+
+Extras (Oct 15, 2026): one-off pieces for one episode (Nick's word; `ep["inserts"]` in project.json,
+because `ep["extras"]` already holds the export's captions and chapter-list files). Each is a sound or
+video file of Nick's, or a show-kit item, played at a time in the recording: the talk pauses there,
+the extras play one after another, and the talk goes on. Extras at a chapter play in its pause or
+break, after the break music and before the page flip or stinger, like the haiku in Spooky Sode.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,6 +37,13 @@ from . import shows as showlib
 from .errors import CutzoError
 
 TALK_REFERENCE_LUFS = -19.2
+
+# Extras (see above)
+EXTRA_KINDS = ("voice", "music", "video")
+EXTRA_BREATH = 0.5  # after a spoken extra, a beat before the page flip, stinger or talk
+EXTRA_MUSIC_LU = -3.0  # a music extra without a known level sits this far below the talk
+EXTRA_MUSIC_FADE = 7.6  # a music extra cut short fades out over this long (Nick's 93696 after the haiku)
+EXTRA_VIDEO_FADE = 0.3  # a video extra dissolves in and out over this long
 
 THE_DIG: dict[str, Any] = {
     "intro": {
@@ -119,7 +133,10 @@ NEW_HERETICS: dict[str, Any] = {
     "ending_level_lu": -14.3,  # ...and the ending music under the sign-off this far
     "default_lead_in": 14.18,
     "break": {"visuals_start": 0.701, "visuals_late": 0.5, "visuals_out": 1.0, "flip_before_end": 1.268,
-              "resume_after_end": 0.3, "no_music_gap": 1.0},
+              "resume_after_end": 0.3, "no_music_gap": 1.0,
+              # before extras (Spooky Sode's haiku) the cue plays on its own for at most 22.1 s, then fades
+              # out over 3.9 s (Nick cut 239_short3 there; the shorter cues are never that long anyway)
+              "alone_before_extras": 22.122, "cut_fade": 3.87},
     "topic": {"flip_after": 0.2},  # a new topic: a pause holding the page flip, which starts this late
     "ending": {"cue_start": 0.367, "lead_in": 60.527, "visuals_late": 0.07, "visuals_fade_short": 2.4,
                "visuals_until": 15.6, "flames_at": 15.115, "flames_start": 5.339, "flames_fade_in": 0.5,
@@ -142,6 +159,111 @@ def slot_choice(show: dict[str, Any], ep: dict[str, Any], slot: str) -> str:
     return "none"
 
 
+@dataclass
+class Extra:
+    """One extra, ready to place: what plays and which part of it. `src` is a kit item id (start and end
+    are then times in the kit file), or "insert:<id>" for a file of Nick's, whose working copies (sound
+    and picture) hold just the part used, so start is 0 there."""
+    item: dict[str, Any]
+    src: str
+    kind: str  # voice, music or video
+    start: float
+    end: float
+
+    @property
+    def length(self) -> float:
+        return self.end - self.start
+
+    @property
+    def has_sound(self) -> bool:
+        return bool(self.item.get("has_sound", True))
+
+    @property
+    def starts_late(self) -> bool:
+        """Starts after the beginning of its file (so it may start mid-sound)."""
+        return float(self.item.get("start") or 0.0) > 0.05
+
+    @property
+    def cut_short(self) -> bool:
+        """Stops before the end of its file."""
+        end = float(self.item.get("end") or self.item.get("seconds") or 0.0)
+        return end < float(self.item.get("seconds") or end) - 0.05
+
+
+def extras_by_time(ep: dict[str, Any], chapters: list[dict[str, Any]], talk_until: float) -> dict[float, list[Extra]]:
+    """The episode's extras grouped by the recording time where the talk pauses for them, in the order
+    they were added. One placed at a chapter follows the chapter if it moves; one at or after
+    `talk_until` (where the kept talk ends) is left out, since there's no talk after it to pause."""
+    times = {c["id"]: float(c["time"]) for c in chapters if c.get("id")}
+    out: dict[float, list[Extra]] = {}
+    for item in ep.get("inserts") or []:
+        t = times.get(item.get("chapter") or "")
+        if t is None:
+            t = float(item["time"])
+        start = float(item.get("start") or 0.0)
+        end = float(item.get("end") or item.get("seconds") or 0.0)
+        if end - start < 0.05 or t >= talk_until - 1e-6:
+            continue
+        kind = item.get("kind") if item.get("kind") in EXTRA_KINDS else "voice"
+        if item.get("asset"):
+            x = Extra(item, item["asset"], kind, start, end)
+        else:
+            x = Extra(item, f"insert:{item['id']}", kind, 0.0, end - start)
+        out.setdefault(t, []).append(x)
+    return out
+
+
+def _extra_gain(x: Extra, talk_lufs: float, loudness_of: Callable[[str], float | None] | None,
+                music_lu: float = EXTRA_MUSIC_LU, known: float | None = None) -> float:
+    """An extra's level: spoken ones (and video) as loud as the talk, music `music_lu` below it, unless the
+    kit knows Nick's level for it (`known`, already relative to this episode's talk); plus the extra's
+    own adjustment. The talk plays in both stereo channels, so its stereo loudness is 3 dB above the
+    one-channel measurement; extras are measured in stereo."""
+    own = float(x.item.get("gain_db") or 0.0)
+    if known is not None:
+        return known + own
+    lufs = loudness_of(x.src) if loudness_of and x.has_sound else None
+    if lufs is None:
+        return own
+    target = talk_lufs + render.MONO_IN_STEREO_DB + (music_lu if x.kind == "music" else 0.0)
+    return target - lufs + own
+
+
+def _extra_pieces(plan: render.Plan, extras: list[Extra], at: float, kit_file: Callable[[str], Path],
+                  gain_of: Callable[[Extra], float]) -> list[tuple[Extra, float]]:
+    """The extras' sound, one after another from `at`. Returns each extra with its start time."""
+    placed, cursor = [], at
+    for x in extras:
+        if x.has_sound:
+            if x.kind == "music":
+                fade_in, fade_out = 0.02, (min(EXTRA_MUSIC_FADE, 0.15 * x.length) if x.cut_short else 0.05)
+            else:
+                fade_in, fade_out = (0.02 if x.starts_late else 0.005), (0.05 if x.cut_short else 0.01)
+            plan.pieces.append(render.Piece(src=kit_file(x.src), channels=2, start=x.start, end=x.end, at=cursor,
+                                            gain_db=gain_of(x), fade_in=fade_in, fade_out=fade_out,
+                                            kind="music" if x.kind == "music" else "bite", label="Extra"))
+        placed.append((x, cursor))
+        cursor += x.length
+    return placed
+
+
+def _cut_out(windows: list[tuple[float, float, float, float]], spans: list[tuple[float, float]],
+             fade: float = EXTRA_VIDEO_FADE) -> list[tuple[float, float, float, float]]:
+    """(start, end, fade in, fade out) windows with the spans taken out (where a video extra covers the frame)."""
+    for x, y in spans:
+        out = []
+        for a, b, fi, fo in windows:
+            if y <= a or x >= b:
+                out.append((a, b, fi, fo))
+                continue
+            if x > a:
+                out.append((a, x, fi, fade))
+            if y < b:
+                out.append((y, b, fade, fo))
+        windows = out
+    return windows
+
+
 def plan_episode(ep: dict[str, Any], show: dict[str, Any], *, voice_path: Path, talk_lufs: float,
                  kit_file: Callable[[str], Path], length_of: Callable[[str], float],
                  loudness_of: Callable[[str], float | None] | None = None) -> render.Plan:
@@ -155,11 +277,18 @@ def plan_episode(ep: dict[str, Any], show: dict[str, Any], *, voice_path: Path, 
     picks = ep.get("picks") or {}
     cold = [(float(p["start"]), float(p["end"])) for p in picks.get("cold_open", [])]
     outro = [(float(p["start"]), float(p["end"])) for p in picks.get("outro", [])]
+    extras = extras_by_time(ep, chapters, kept[-1][1])
     plan = render.Plan()
 
-    if recipe is None:  # a plain episode: just the conversation
-        pieces, to_finished, talk_end = render.conversation(voice_path, kept, 0.0)
+    def gain_of(x: Extra) -> float:
+        return _extra_gain(x, talk_lufs, loudness_of)
+
+    if recipe is None:  # a plain episode: just the conversation (and any extras)
+        gaps = {t: sum(x.length for x in xs) for t, xs in extras.items()}
+        pieces, to_finished, talk_end = render.conversation(voice_path, kept, 0.0, gaps)
         plan.pieces += pieces
+        for t, xs in extras.items():
+            _extra_pieces(plan, xs, to_finished(t) - gaps[t], kit_file, gain_of)
         plan.talk_start, plan.talk_end = 0.0, talk_end
         plan.chapters = _chapters(chapters, to_finished, {})
         return plan
@@ -167,7 +296,7 @@ def plan_episode(ep: dict[str, Any], show: dict[str, Any], *, voice_path: Path, 
     if recipe is NEW_HERETICS:
         return _new_heretics(ep, show, recipe, voice_path=voice_path, talk_lufs=talk_lufs, kit_file=kit_file,
                              length_of=length_of, loudness_of=loudness_of, kept=kept, chapters=chapters,
-                             cold=cold, outro=outro)
+                             cold=cold, outro=outro, extras=extras)
     plan.duck_db = float(recipe.get("duck_db", 0.0))
     plan.talk_reference_lufs = TALK_REFERENCE_LUFS
     kit_offset = talk_lufs - TALK_REFERENCE_LUFS  # keeps Nick's balance whatever level the talk is at
@@ -210,13 +339,26 @@ def plan_episode(ep: dict[str, Any], show: dict[str, Any], *, voice_path: Path, 
         gap += brk["stinger_length"]
     segment_starts = [c["time"] for c in chapters[1:]] if gap > 0 else []
     breaks = {t: gap for t in segment_starts}
+
+    def extras_length(xs: list[Extra], in_break: bool) -> float:
+        # in a break, a spoken extra gets a beat before the stinger
+        return sum(x.length for x in xs) + (EXTRA_BREATH if in_break and xs and xs[-1].kind != "music" else 0.0)
+
+    for t, xs in extras.items():
+        breaks[t] = breaks.get(t, 0.0) + extras_length(xs, t in breaks)
     pieces, to_finished, talk_end = render.conversation(voice_path, kept, talk_at, breaks)
     plan.pieces += pieces
     plan.talk_start, plan.talk_end = talk_at, talk_end
+    for t, xs in extras.items():  # extras in a plain pause; those in a break are placed below
+        if t not in segment_starts:
+            _extra_pieces(plan, xs, to_finished(t) - extras_length(xs, False), kit_file, gain_of)
     stinger_at: dict[float, float] = {}
     for n, t in enumerate(segment_starts):
+        xs = extras.get(t, [])
         resume = to_finished(t)  # where the next segment's talking starts
-        stop = resume - gap  # where the previous segment's talking stopped
+        stop = resume - gap - extras_length(xs, True)  # where the previous segment's talking stopped
+        if xs:  # after the theme plays on its own, before the stinger
+            _extra_pieces(plan, xs, stop + (brk["alone"] if theme != "none" else 0.0), kit_file, gain_of)
         if theme != "none":
             src_start = brk["theme_starts"][n % len(brk["theme_starts"])]
             length = brk["lead_in"] + brk["alone"]
@@ -284,7 +426,7 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
                   talk_lufs: float, kit_file: Callable[[str], Path], length_of: Callable[[str], float],
                   loudness_of: Callable[[str], float | None] | None, kept: list[tuple[float, float]],
                   chapters: list[dict[str, Any]], cold: list[tuple[float, float]],
-                  outro: list[tuple[float, float]]) -> render.Plan:
+                  outro: list[tuple[float, float]], extras: dict[float, list[Extra]]) -> render.Plan:
     """The New Heretics' layout (see NEW_HERETICS), sound and picture."""
     ref = recipe["talk_reference_lufs"]
     plan = render.Plan(talk_reference_lufs=ref)
@@ -327,6 +469,20 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
                                         gain_db=gain + kit_offset, fade_in=0.01, fade_out=0.05, kind="effect",
                                         label=label))
 
+    def extra_gain(x: Extra) -> float:
+        known = recipe["cues"].get(x.src, (None, None))[0]  # a kit cue with Nick's own level (93696)
+        return _extra_gain(x, talk_lufs, loudness_of, recipe["break_level_lu"],
+                           None if known is None else known + kit_offset)
+
+    video_spans: list[tuple[float, float]] = []  # where a video extra covers the frame (no spectrum there)
+
+    def extra_videos(placed: list[tuple[Extra, float]]) -> None:
+        for x, at in placed:
+            if x.kind == "video":
+                pic.layers.append(render.Layer("video", x.src, at=at, length=x.length, start=x.start,
+                                               fade_in=EXTRA_VIDEO_FADE, fade_out=EXTRA_VIDEO_FADE, label="Extra video"))
+                video_spans.append((at, at + x.length))
+
     # ---- teaser and montage
     teaser_len = sum(b - a for a, b in cold) - render.XFADE * max(0, len(cold) - 1)
     teaser_at = T["at"] if cold else 0.0
@@ -357,20 +513,37 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
                else None if break_music == "none" else break_music)
         sound = transition(c)
         sound_len = sound[1] if sound else 0.0
+        xs = extras.get(float(c["time"]), [])
         if cue:
             length = length_of(cue)
             lead = min(recipe["cues"].get(cue, (None, None))[1] or recipe["default_lead_in"], max(1.0, length - 2.0))
-            after = (sound_len - B["flip_before_end"]) if sound else B["resume_after_end"]
-            gap = length - lead + max(0.0, after)
+            if xs:  # extras follow: a long cue is cut short
+                length = min(length, lead + B["alone_before_extras"])
         else:
             length = lead = 0.0
+        # After the talk stops: the break music on its own, then any extras, then the page flip (which
+        # starts before the end of the last music, as in Nick's breaks) and the talk.
+        if cue or xs:
+            ends_in_music = xs[-1].kind == "music" if xs else True
+            if sound:
+                tail = (sound_len - B["flip_before_end"]) if ends_in_music else EXTRA_BREATH + sound_len
+            else:
+                tail = B["resume_after_end"] if ends_in_music else EXTRA_BREATH
+            gap = (length - lead) + sum(x.length for x in xs) + max(0.0, tail)
+        else:
             gap = sound_len + B["no_music_gap"]
-        breaks.append((c, cue, length, lead, gap, sound))
+        breaks.append((c, cue, length, lead, gap, sound, xs))
         gaps[float(c["time"])] = gaps.get(float(c["time"]), 0.0) + gap
     for c in topics:
         sound = transition(c)
-        if sound:
-            gaps[float(c["time"])] = gaps.get(float(c["time"]), 0.0) + recipe["topic"]["flip_after"] + sound[1]
+        xs = extras.get(float(c["time"]), [])
+        if sound or xs:
+            gaps[float(c["time"])] = gaps.get(float(c["time"]), 0.0) + sum(x.length for x in xs) + (
+                recipe["topic"]["flip_after"] + sound[1] if sound else 0.0)
+    chapter_times = {float(c["time"]) for c in chapters[1:]}
+    for t, xs in extras.items():  # extras away from chapters: the talk just pauses for them
+        if t not in chapter_times:
+            gaps[t] = gaps.get(t, 0.0) + sum(x.length for x in xs)
     pieces, to_finished, talk_end = render.conversation(voice_path, kept, talk_at, gaps)
     plan.pieces += pieces
     plan.talk_start, plan.talk_end = talk_at, talk_end
@@ -378,21 +551,50 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
     title_from = (m + M["title_at"]) if m is not None else max(0.0, talk_at - 0.5)
     title_in = recipe["fade_back"]
     spectrum_from = max(0.0, talk_at - M["spectrum_early"])
-    for c, cue, length, lead, gap, sound in breaks:
+    for c, cue, length, lead, gap, sound, xs in breaks:
         resume = to_finished(float(c["time"]))
         stop = resume - gap
         fade = max(0.5, lead - B["visuals_late"]) if cue else 0.5
         titles.append((title_from, stop, title_in, fade))
         spectrum.append((spectrum_from, stop, recipe["fade_back"], fade))
         if cue:
+            cut = length < length_of(cue) - 0.05
             plan.pieces.append(render.Piece(src=kit_file(cue), channels=2, start=0.0, end=length, at=stop - lead,
                                             gain_db=level(cue, recipe["break_level_lu"], -9.0) + kit_offset,
-                                            fade_in=lead, curve="premiere", kind="music", label="Break music"))
-            if break_visuals != "none":
-                vis_at = stop - lead + B["visuals_late"]
-                pic.layers.append(render.Layer("video", break_visuals, at=vis_at, length=resume + B["visuals_out"] - vis_at,
-                                               start=B["visuals_start"], fade_in=stop - vis_at,
-                                               fade_out=B["visuals_out"], label="Break visuals", blend="screen"))
+                                            fade_in=lead, fade_out=B["cut_fade"] if cut else 0.0, curve="premiere",
+                                            kind="music", label="Break music"))
+        placed = _extra_pieces(plan, xs, stop + length - lead, kit_file, extra_gain)
+        # The break visuals show under the music: from the cue's start, paused (with a 1 s fade) while a
+        # spoken or video extra plays, back for music extras (carrying on where they stopped), until just
+        # after the talk comes back. A spoken extra gets the spectrum, as Nick's haiku did.
+        if break_visuals != "none":
+            runs: list[tuple[float, float, float, float]] = []
+            vis_at = stop - lead + B["visuals_late"]
+            run = (vis_at, stop - vis_at) if cue else None
+            for x, at in placed:
+                if x.kind == "music" and run is None:
+                    run = (at, 1.0)
+                elif x.kind != "music" and run is not None:
+                    runs.append((run[0], at, run[1], 1.0))
+                    run = None
+            if run is not None:
+                runs.append((run[0], resume + B["visuals_out"], run[1], B["visuals_out"]))
+            source = B["visuals_start"]
+            for a, b, fi, fo in runs:
+                if b - a > 0.1:
+                    pic.layers.append(render.Layer("video", break_visuals, at=a, length=b - a, start=source,
+                                                   fade_in=min(fi, b - a), fade_out=fo, label="Break visuals",
+                                                   blend="screen"))
+                source += b - a
+        voiced: list[list[float]] = []
+        for x, at in placed:
+            if x.kind == "voice":
+                if voiced and abs(voiced[-1][1] - at) < 1e-6:
+                    voiced[-1][1] = at + x.length
+                else:
+                    voiced.append([at, at + x.length])
+        spectrum += [(a, b, 0.0, 0.0) for a, b in voiced]
+        extra_videos(placed)
         if sound:
             play(sound, resume - sound[1])
         chapter_at[c["id"]] = resume - (sound[1] if sound else 0.0)
@@ -400,9 +602,15 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
     for c in topics:
         resume = to_finished(float(c["time"]))
         sound = transition(c)
+        xs = extras.get(float(c["time"]), [])
+        before = recipe["topic"]["flip_after"] + sound[1] if sound else 0.0
+        extra_videos(_extra_pieces(plan, xs, resume - before - sum(x.length for x in xs), kit_file, extra_gain))
         if sound:
             play(sound, resume - sound[1])
         chapter_at[c["id"]] = resume - (sound[1] if sound else 0.0)
+    for t, xs in extras.items():
+        if t not in chapter_times:
+            extra_videos(_extra_pieces(plan, xs, to_finished(t) - sum(x.length for x in xs), kit_file, extra_gain))
 
     # ---- the ending: music under the last minute of talk, then the sign-off over Full Flames
     signoff_at = talk_end + E["signoff_at"]
@@ -472,7 +680,7 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
                                       label="Episode title"))
     pic.layers = under + pic.layers
     if slot_choice(show, ep, "spectrum") != "none":
-        pic.spectrum = [(a, b, fi, min(fo, b - a)) for a, b, fi, fo in spectrum if b - a > 0.1]
+        pic.spectrum = [(a, b, fi, min(fo, b - a)) for a, b, fi, fo in _cut_out(spectrum, video_spans) if b - a > 0.1]
     ordered = chapters
     plan.chapters = [{"time": 0.0 if n == 0 else round(max(0.0, chapter_at.get(c["id"], to_finished(c["time"]))), 3),
                       "title": c["title"]} for n, c in enumerate(ordered)]

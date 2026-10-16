@@ -247,6 +247,27 @@ def loudness(asset_id: str, *, kit_dir: Path, drive: Path | None, check=None) ->
 VIDEO_SIZE = (1920, 1080)
 
 
+def fit_1080p(src: Path, dst: Path, *, start: float = 0.0, length: float | None = None, check=None,
+              progress=None) -> Path:
+    """Part of any video's picture (no sound) as 1080p, 29.97 fps x264, scaled to fit and letterboxed
+    with black if it isn't 16:9 (for video extras: clips, phone videos)."""
+    from ..tools import ffmpeg
+
+    w, h = VIDEO_SIZE
+    args = ["-ss", f"{start:.3f}"] if start > 0 else []
+    args += ["-i", str(src)]
+    if length:
+        args += ["-t", f"{length:.3f}"]
+    args += ["-an", "-sn", "-dn", "-vf",
+             f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,"
+             "fps=30000/1001,format=yuv420p,setsar=1",
+             "-c:v", "libx264", "-preset", "faster", "-crf", "16", "-g", "30", "-keyint_min", "30",
+             "-sc_threshold", "0", "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
+             "-movflags", "+faststart", "-f", "mp4", str(dst)]
+    ffmpeg.run(args, duration=length, progress=progress, check=check)
+    return dst
+
+
 def video_copy(asset_id: str, *, kit_dir: Path, drive: Path | None, until: float | None = None,
                check=None, progress=None) -> Path:
     """A 1080p, 29.97 fps copy of a kit video (no sound), so making an episode's video never has to

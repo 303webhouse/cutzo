@@ -130,6 +130,108 @@ def test_a_chapter_named_like_a_voiced_title_plays_it_instead_of_the_page_flip()
     assert chapter["time"] == pytest.approx(voiced[0].at, abs=0.001)
 
 
+def _haiku_extras():
+    """Spooky Sode's first break as Nick cut it: the haiku intro (two parts of the voice-over), the haiku
+    itself (a file of his) and 93696 for 50 s."""
+    return [
+        {"id": "i1", "asset": "tnh-vo-haiku-intro", "chapter": "c2", "time": 2462.0, "kind": "voice",
+         "start": 0.0, "end": 0.834, "seconds": 6.034},
+        {"id": "i2", "asset": "tnh-vo-haiku-intro", "chapter": "c2", "time": 2462.0, "kind": "voice",
+         "start": 3.437, "end": 6.034, "seconds": 6.034},
+        {"id": "i3", "file": r"G:\My Drive\Spooky Haiku.wav", "chapter": "c2", "time": 2462.0, "kind": "voice",
+         "start": 0.0, "end": 9.643, "seconds": 9.643},
+        {"id": "i4", "asset": "tnh-cue-93696", "chapter": "c2", "time": 2462.0, "kind": "music",
+         "start": 0.0, "end": 50.117, "seconds": 109.83},
+    ]
+
+
+def test_extras_in_a_break_play_after_the_music_like_the_spooky_haiku():
+    plain = _plan(SPOOKY)
+    ep = copy.deepcopy(SPOOKY)
+    ep["inserts"] = _haiku_extras()
+    plan = _plan(ep)
+    by = lambda label: [p for p in plan.pieces if p.label == label]  # noqa: E731
+    music = by("Break music")[0]
+    stop = music.at + 28.83  # where the talk stops
+    # Before extras the cue plays on its own for 22.1 s and fades out over 3.9 s, as Nick cut it.
+    assert music.length == pytest.approx(28.83 + 22.122) and music.fade_out == 3.87
+    extras = by("Extra")
+    assert [str(x.src) for x in extras] == ["tnh-vo-haiku-intro", "tnh-vo-haiku-intro", "insert:i3", "tnh-cue-93696"]
+    assert extras[0].at == pytest.approx(stop + 22.122)
+    for a, b in zip(extras, extras[1:]):
+        assert b.at == pytest.approx(a.until)  # one after another, as in Nick's edit
+    assert [x.kind for x in extras] == ["bite", "bite", "bite", "music"]
+    assert extras[3].fade_out == pytest.approx(0.15 * 50.117)  # 93696 is cut short: it fades out
+    assert extras[3].gain_db == pytest.approx(-0.5)  # Nick's own level for 93696
+    # The page flip starts 1.268 s before 93696 ends and the talk resumes as it ends: 85.95 s after the talk
+    # stopped, as in JW Ghost Stories (2322.053 to 2408.006).
+    flip = [p for p in by("Page flip") if p.at > stop][0]
+    assert flip.at == pytest.approx(extras[3].until - 1.268)
+    resume = flip.until
+    assert resume - stop == pytest.approx(85.949, abs=0.01)
+    chapter = next(c for c in plan.chapters if c["title"] == "Second segment")
+    assert chapter["time"] == pytest.approx(flip.at, abs=0.001)
+    # The break visuals stop (1 s fade) for the spoken part and come back for 93696, carrying on.
+    visuals = [x for x in plan.picture.layers if x.label == "Break visuals" and stop - 60 < x.at < resume]
+    assert len(visuals) == 2
+    assert visuals[0].until == pytest.approx(extras[0].at) and visuals[0].fade_out == 1.0
+    assert visuals[1].at == pytest.approx(extras[3].at) and visuals[1].fade_in == 1.0
+    assert visuals[1].start == pytest.approx(visuals[0].start + visuals[0].length)
+    assert visuals[1].until == pytest.approx(resume + 1.0)
+    # The spectrum shows the haiku's voices, cut in and out (no fades), as Nick's did.
+    assert any(w[0] == pytest.approx(extras[0].at) and w[1] == pytest.approx(extras[2].until) and w[2] == w[3] == 0.0
+               for w in plan.picture.spectrum)
+    # Everything after the break moves on by the extras' time, less the music cut.
+    longer = sum(x.length for x in extras) - (63.81 - 28.83 - 22.122)
+    assert plan.total - plain.total == pytest.approx(longer, abs=0.01)
+
+
+def test_extras_away_from_chapters_pause_the_talk_and_a_video_covers_the_frame():
+    plain = _plan(SPOOKY)
+    ep = copy.deepcopy(SPOOKY)
+    ep["inserts"] = [{"id": "i1", "file": r"C:\clips\reaction.mp4", "time": 3000.0, "kind": "video",
+                      "start": 2.0, "end": 14.0, "seconds": 30.0},
+                     {"id": "i2", "file": r"C:\clips\gone.wav", "time": 9999.0, "kind": "voice", "seconds": 3.0}]
+    plan = _plan(ep)
+    extra = [p for p in plan.pieces if p.label == "Extra"]
+    assert len(extra) == 1  # the one after the talk ends has no talk to pause, so it's left out
+    sound = extra[0]  # the working copy holds just the 12 s used, so it plays from its start
+    assert sound.length == pytest.approx(12.0) and sound.start == 0.0 and sound.kind == "bite"
+    assert sound.fade_in == 0.02 and sound.fade_out == 0.05  # starts late and stops early: short fades
+    # The talk stops at 3000 s of the recording and carries on after the clip.
+    voice = [p for p in plan.pieces if p.label == "Conversation"]
+    before = next(p for p in voice if p.end == pytest.approx(3000.0))
+    after = next(p for p in voice if p.start == pytest.approx(3000.0))
+    assert sound.at == pytest.approx(before.until) and after.at == pytest.approx(sound.until)
+    layer = next(x for x in plan.picture.layers if x.label == "Extra video")
+    assert (layer.src, layer.at, layer.length, layer.start) == ("insert:i1", pytest.approx(sound.at), 12.0, 0.0)
+    assert not any(a < sound.at + 6 < b for a, b, _, _ in plan.picture.spectrum)  # no spectrum over the clip
+    assert plan.total - plain.total == pytest.approx(12.0)
+    later = next(c for c in plan.chapters if c["title"] == "Third segment")
+    assert later["time"] - next(c for c in plain.chapters if c["title"] == "Third segment")["time"] == pytest.approx(12.0)
+
+
+def test_extras_follow_their_chapter_and_levels_match_the_talk():
+    ep = copy.deepcopy(SPOOKY)
+    ep["chapters"][3]["time"] = 7000.0  # the topic chapter moved after the extra was added
+    ep["inserts"] = [{"id": "i1", "file": "a.wav", "chapter": "c4", "time": 6949.0, "kind": "voice", "seconds": 4.0},
+                     {"id": "i2", "file": "b.wav", "chapter": "c4", "time": 6949.0, "kind": "music", "seconds": 8.0,
+                      "gain_db": -2.0}]
+    show = shows.get_show("the-new-heretics")
+    plan = recipes.plan_episode(ep, show, voice_path=Path("v.f32"), talk_lufs=REF_MONO, kit_file=lambda a: Path(a),
+                                length_of=lambda a: kit.seconds(a) or 1e9,
+                                loudness_of=lambda a: {"insert:i1": -20.0, "insert:i2": -10.0}.get(a, -14.0))
+    voice, music = [p for p in plan.pieces if p.label == "Extra"]
+    # A new topic: the extras, then the page flip, then the talk; the chapter starts at the flip.
+    flip = next(p for p in plan.pieces if p.label == "Page flip" and p.at > voice.at)
+    assert music.at == pytest.approx(voice.until) and flip.at == pytest.approx(music.until + 0.2)
+    resume = next(p for p in plan.pieces if p.label == "Conversation" and p.start == pytest.approx(7000.0)).at
+    assert flip.until == pytest.approx(resume)
+    # Spoken extras play as loud as the talk (-16 LUFS in stereo here); music 3 dB below; plus their own change.
+    assert voice.gain_db == pytest.approx(-16.0 - -20.0)
+    assert music.gain_db == pytest.approx(-16.0 - 3.2 - -10.0 - 2.0)
+
+
 def test_without_montage_or_teaser_the_talk_starts_at_once():
     show = shows.get_show("the-new-heretics")
     ep = _ep(duration=600.0, chapters=[{"id": "c1", "time": 0, "title": "Start"}],
@@ -325,7 +427,8 @@ def heretics(tmp_path, monkeypatch):
                     sound=asset_id == "tnh-montage")
         monkeypatch.setitem(kit._BY_ID[asset_id], "seconds", seconds)
     for asset_id, seconds, freq in (("tnh-cue-239-short3", 8.0, 330), ("tnh-cue-239-short2", 6.0, 392),
-                                    ("tnh-cue-239-full", 12.0, 262), ("tnh-page-flip", 1.0, 880)):
+                                    ("tnh-cue-239-full", 12.0, 262), ("tnh-page-flip", 1.0, 880),
+                                    ("tnh-vo-haiku-intro", 2.0, 660), ("tnh-cue-93696", 6.0, 523)):
         asset = kit.get_asset(asset_id)
         folder = tnh.parent.joinpath(*asset["folder"].split("/"))
         folder.mkdir(parents=True, exist_ok=True)
@@ -421,3 +524,69 @@ def test_video_export_end_to_end(heretics):
     chapters = Path(extras["chapters_file"]).read_text(encoding="utf-8").splitlines()
     assert chapters[0] == "0:00 Start" and len(chapters) == 3
     assert "Captions" in job["result"]["summary"]
+
+
+def test_extras_in_a_real_episode(heretics, tmp_path):
+    from cutzo.core.errors import NotFound
+
+    app, ep_id = heretics
+    assert app.jobs.wait(app.build_episode(ep_id)["job"]["id"], 300)["status"] == "done"
+    for e in app.get_episode(ep_id)["edits"]:
+        app.restore_cut(ep_id, e["id"])
+    app.add_chapter(ep_id, 0, "Start")
+    app.add_chapter(ep_id, 15.0, "Next segment", segment=True)
+    before = app.get_episode(ep_id)["finished_duration"]
+    clip = tmp_path / "Reaction clip.mp4"
+    _make_video(clip, 4.0, "magenta", sound=True)
+    # Where and what: plain-English refusals
+    with pytest.raises(NotFound):
+        app.add_insert(ep_id, str(tmp_path / "missing.wav"), time=5)
+    with pytest.raises(CutzoError):
+        app.add_insert(ep_id, str(clip), time=24.9)  # after the talk ends
+    with pytest.raises(CutzoError):
+        app.add_insert(ep_id, str(clip))  # nowhere
+    with pytest.raises(NotFound):
+        app.add_insert(ep_id, str(clip), chapter="no such chapter")
+    # A clip at 5 s of the talk (seconds 1 to 3 of it), the haiku intro and 50 s of 93696 in the break
+    video_extra = app.add_insert(ep_id, str(clip), time="0:05", start=1, end=3)
+    assert video_extra["extra"]["kind"] == "video" and video_extra["extra"]["where"] == "At 0:05 in the talk"
+    voice = app.add_insert(ep_id, "Haiku Intro", chapter="next segment")
+    assert voice["extra"]["kind"] == "voice" and voice["extra"]["asset"] == "tnh-vo-haiku-intro"
+    assert voice["extra"]["where"] == "In the break before “Next segment”"
+    music = app.add_insert(ep_id, "93696", time=15.2, end=3.0)  # within half a second of the chapter: counts as it
+    assert music["extra"]["kind"] == "music" and music["extra"]["chapter"] == voice["extra"]["chapter"]
+    view = app.get_episode(ep_id)
+    assert [x["label"] for x in view["inserts"]] == ["Reaction clip", "Haiku Intro", "93696"]
+    assert view["finished_duration"] == pytest.approx(before + 2.0 + 2.0 + 3.0, abs=0.05)  # the clip, then the break
+    # Undo takes the last one out; remove takes out another
+    app.undo(ep_id)
+    assert len(app.get_episode(ep_id)["inserts"]) == 2
+    music = app.add_insert(ep_id, "93696", chapter="Next segment", end=3.0, gain_db=-2)
+    job = app.jobs.wait(app.export(ep_id, ["youtube-1080p"])["job"]["id"], 600)
+    assert job["status"] == "done", job.get("error")
+    x = app.get_episode(ep_id)["exports"][-1]
+    failed = [r for r in x["check"]["rules"] if not r["pass"]]
+    # The test's pure tones are so simple that AAC spends few bits on them; real sound doesn't do that.
+    assert all(r["rule"] == "Bitrate" and "kbps" in r["found"] for r in failed), failed
+    assert x["layout"]["pieces"]["Extra"] == 3 and x["layout"]["picture"]["layers"]["Extra video"] == 1
+    copies = app.library / "episodes" / ep_id / "inserts"
+    vid = video_extra["extra"]["id"]
+    assert (copies / f"{vid}.f32").exists() and (copies / f"{vid}-1080p.mp4").exists()
+    assert audio_seconds(copies / f"{vid}.f32") == pytest.approx(2.0, abs=0.05)  # just the part used
+    # A frame in the middle of the clip shows it (magenta box), not the red background.
+    sound = next(p for p in recipes.plan_episode(app._load(ep_id), shows.get_show("the-new-heretics"),
+                                                  voice_path=Path("v.f32"), talk_lufs=-20.0,
+                                                  kit_file=lambda a: Path(a), length_of=lambda a: kit.seconds(a) or 1e9)
+                 .pieces if p.label == "Extra" and p.src == Path(f"insert:{vid}"))
+    frame = subprocess.run([str(FFMPEG), "-v", "error", "-ss", f"{sound.at + 1.0:.2f}", "-i", x["file"], "-frames:v", "1",
+                            "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
+    img = np.frombuffer(frame, np.uint8).reshape(180, 320, 3).astype(int)
+    magenta = (img[..., 0] > 150) & (img[..., 1] < 110) & (img[..., 2] > 150)
+    assert magenta.mean() > 0.3
+    app.remove_insert(ep_id, vid)
+    assert not (copies / f"{vid}.f32").exists() and not (copies / f"{vid}-1080p.mp4").exists()
+    assert [x["label"] for x in app.get_episode(ep_id)["inserts"]] == ["Haiku Intro", "93696"]
+
+
+def audio_seconds(path: Path) -> float:
+    return path.stat().st_size / (4 * 2 * RATE)

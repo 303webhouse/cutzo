@@ -37,6 +37,10 @@ export function mountReview(container, initialEp, ctx) {
   let chapterTimeTouched = false;
   const chapterDraft = { time: null, title: "", segment: false };
   const titleDraft = { touched: false, label: "", title: "", guests: "" };
+  // Extras: one-off sounds or videos for this episode (the haiku in Spooky Sode).
+  let extraTimeTouched = false;
+  const extraDraft = { where: "time", time: null, file: "", kind: "", start: "", end: "", gain: "", label: "", more: false };
+  let kitItems = null; // the show kit's sound and video items, suggested in the file box
   let cutSignature = "";
   const look = SHOW_LOOK[ep.show] || SHOW_LOOK["the-dig"];
   const real = !ep.sample;
@@ -504,7 +508,92 @@ export function mountReview(container, initialEp, ctx) {
         : "Paste into the episode notes. Times match the finished file, intro and breaks included."),
       yt,
       ep.chapter_warnings && ep.chapter_warnings.length ? h("ul", { class: "warn-list" }, ep.chapter_warnings.map((w) => h("li", {}, w))) : null);
-    add(side, [cutsSec, chapters, graphic, youtube]);
+    add(side, [cutsSec, chapters, real ? extrasSection() : null, graphic, youtube]);
+  }
+
+  function extrasSection() {
+    const items = ep.inserts || [];
+    if (kitItems === null) {
+      kitItems = [];
+      api(`/api/assets?show=${encodeURIComponent(ep.show)}`).then((r) => {
+        kitItems = r.assets.filter((a) => a.kind === "audio" || a.kind === "video");
+        const list = document.getElementById("extra-kit");
+        if (list) add(list, kitItems.map((a) => h("option", { value: a.name.replace(/\.[^.]+$/, "") })));
+      }).catch(() => {});
+    }
+    const segments = ep.breaks_at === "segments";
+    const timeBox = h("input", {
+      type: "text", id: "extra-time", "aria-label": "Time in the recording", hidden: extraDraft.where !== "time",
+      value: extraTimeTouched && extraDraft.time != null ? extraDraft.time : fmtTime(audio.currentTime || 0),
+      oninput: (e) => { extraTimeTouched = true; extraDraft.time = e.target.value; },
+    });
+    const whereRow = h("div", { class: `where${extraDraft.where === "time" ? "" : " no-time"}` });
+    const whereSel = h("select", {
+      "aria-label": "Where the extra goes",
+      onchange: (e) => {
+        extraDraft.where = e.target.value;
+        timeBox.hidden = e.target.value !== "time";
+        whereRow.classList.toggle("no-time", e.target.value !== "time");
+      },
+    },
+    h("option", { value: "time", selected: extraDraft.where === "time" }, "At a time in the talk"),
+    ep.chapters.slice(1).map((c) => h("option", { value: c.id, selected: extraDraft.where === c.id },
+      !segments || c.segment ? `In the break before \u201c${c.title}\u201d` : `Before the topic \u201c${c.title}\u201d`)));
+    add(whereRow, [whereSel, timeBox]);
+    const fileBox = h("input", {
+      type: "text", list: "extra-kit", "aria-label": "File or show-kit item", value: extraDraft.file,
+      placeholder: "G:\\My Drive\\...\\Spooky Haiku.wav, or Haiku Intro",
+      oninput: (e) => { extraDraft.file = e.target.value; },
+    });
+    const kindSel = h("select", { "aria-label": "What it is", onchange: (e) => { extraDraft.kind = e.target.value; } },
+      [["", "Cutzo guesses"], ["voice", "Spoken"], ["music", "Music"], ["video", "Video"]]
+        .map(([v, t]) => h("option", { value: v, selected: extraDraft.kind === v }, t)));
+    const small = (key, label, hint) => h("label", { class: "field" }, label,
+      h("input", { type: "text", value: extraDraft[key], placeholder: hint, oninput: (e) => { extraDraft[key] = e.target.value; } }));
+    const more = h("details", { open: extraDraft.more, ontoggle: (e) => { extraDraft.more = e.target.open; } },
+      h("summary", {}, "Part of the file, level, name"),
+      h("div", { class: "pair" }, small("start", "From", "0:00"), small("end", "To", "the end")),
+      h("div", { class: "pair" }, small("gain", "Level change (dB)", "0"), small("label", "Name", "the file's name")));
+    const submit = async (e) => {
+      e.preventDefault();
+      if (!extraDraft.file.trim()) return fileBox.focus();
+      const gain = extraDraft.gain.trim() ? Number(extraDraft.gain.trim().replace(",", ".")) : null;
+      if (Number.isNaN(gain)) return toast("The level change must be a number, like -3 or 2.", { kind: "error" });
+      const body = { file: extraDraft.file.trim(), kind: extraDraft.kind || null, gain_db: gain,
+                     start: extraDraft.start.trim() || null, end: extraDraft.end.trim() || null, label: extraDraft.label.trim() || null };
+      if (extraDraft.where === "time") body.time = timeBox.value.trim();
+      else body.chapter = extraDraft.where;
+      const res = await ctx.act(() => api(`${epPath(ep.id)}/extras`, { method: "POST", body }), (r) => r.summary);
+      if (res) {
+        Object.assign(extraDraft, { file: "", start: "", end: "", gain: "", label: "", time: null });
+        extraTimeTouched = false;
+      }
+    };
+    return h("section", { id: "extras-side" },
+      h("div", { class: "side-head" }, h("h3", {}, "Extras"), h("span", {}, items.length ? plural(items.length, "extra") : "")),
+      h("p", { class: "small muted" }, "One-off sounds or videos for this episode, like the haiku in Spooky Sode. "
+        + "The talk pauses for them; you hear them in the finished file."),
+      items.length ? h("ul", { class: "items" }, items.map((x) => h("li", { class: "item" },
+        h("div", { class: "item-main", onclick: () => seek(Math.max(0, x.at_time - 3), true), title: "Play the talk around this spot" },
+          h("div", {}, h("span", { class: "item-time" }, x.time_text), " ", h("span", { class: "chapter-title" }, x.label)),
+          h("div", { class: "item-text item-wrap" }, x.where),
+          h("div", { class: "item-text", title: x.source }, [
+            `${x.kind_label[0].toUpperCase()}${x.kind_label.slice(1)}`, x.length_text, x.part,
+            x.gain_db ? `${x.gain_db > 0 ? "+" : "−"}${Math.abs(x.gain_db)} dB` : null].filter(Boolean).join(" · ")),
+          h("div", { class: "item-tags" }, h("span", { class: x.by === "claude" ? "tag tag-claude" : "tag" }, BY[x.by] || x.by))),
+        h("button", {
+          class: "btn btn-quiet btn-small",
+          "aria-label": `Remove extra ${x.label}`,
+          onclick: () => ctx.act(() => api(`${epPath(ep.id)}/extras/${encodeURIComponent(x.id)}`, { method: "DELETE" }), (r) => r.summary),
+        }, "Remove")))) : null,
+      h("form", { onsubmit: submit },
+        h("div", { class: "field" }, h("span", {}, "Where"), whereRow),
+        h("label", { class: "field" }, "File or show-kit item",
+          h("span", { class: "hint" }, "In File Explorer, right-click the file and choose Copy as path."), fileBox),
+        h("datalist", { id: "extra-kit" }, (kitItems || []).map((a) => h("option", { value: a.name.replace(/\.[^.]+$/, "") }))),
+        h("label", { class: "field" }, "What it is", kindSel),
+        more,
+        h("button", { class: "btn", type: "submit" }, "Add extra")));
   }
 
   function prefillChapter(t) {
@@ -565,6 +654,10 @@ export function mountReview(container, initialEp, ctx) {
     follow(audio.currentTime);
     if (!chapterTimeTouched) {
       const input = document.getElementById("chapter-time");
+      if (input && document.activeElement !== input) input.value = fmtTime(t);
+    }
+    if (!extraTimeTouched) {
+      const input = document.getElementById("extra-time");
       if (input && document.activeElement !== input) input.value = fmtTime(t);
     }
     if (play && audio.paused) togglePlay();
@@ -1008,6 +1101,10 @@ export function mountReview(container, initialEp, ctx) {
       : ["After cuts ", h("b", {}, fmtTime(ep.final_duration || 0))]));
     if (!chapterTimeTouched && !audio.paused) {
       const input = document.getElementById("chapter-time");
+      if (input && document.activeElement !== input) input.value = fmtTime(audio.currentTime);
+    }
+    if (!extraTimeTouched && !audio.paused) {
+      const input = document.getElementById("extra-time");
       if (input && document.activeElement !== input) input.value = fmtTime(audio.currentTime);
     }
   }

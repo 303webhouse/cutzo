@@ -247,6 +247,27 @@ def test_dig_layout_matches_season_debrief_part_2():
     assert plan.duck_db == recipes.THE_DIG["duck_db"] > 0  # music dips under voices (Nick, Oct 14)
 
 
+def test_dig_extras_play_between_the_theme_and_the_stinger():
+    from cutzo.core import shows
+
+    show = shows.get_show("the-dig")
+    ep = _ep(chapters=(0, 200, 400))
+    ep["chapters"] = [{"id": f"c{n}", **c} for n, c in enumerate(ep["chapters"])]
+    plain = recipes.plan_episode(ep, show, voice_path=Path("v.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
+                                 kit_file=lambda a: Path(a), length_of=lambda a: 1e9)
+    ep["inserts"] = [{"id": "i1", "file": "drop.wav", "chapter": "c1", "time": 200, "kind": "voice", "seconds": 5.0},
+                     {"id": "i2", "file": "clip.mp4", "time": 300.0, "kind": "video", "seconds": 7.0}]
+    plan = recipes.plan_episode(ep, show, voice_path=Path("v.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
+                                kit_file=lambda a: Path(a), length_of=lambda a: 1e9)
+    drop, clip = sorted((p for p in plan.pieces if p.label == "Extra"), key=lambda p: p.at)
+    theme = [p for p in plan.pieces if p.label == "Theme (break)"][0]
+    stinger = [p for p in plan.pieces if p.label == "Stinger"][0]
+    assert drop.at == pytest.approx(theme.at + recipes.THE_DIG["break"]["lead_in"] + recipes.THE_DIG["break"]["alone"])
+    assert stinger.at == pytest.approx(drop.until + recipes.EXTRA_BREATH)
+    assert clip.length == 7.0 and plan.picture is None  # The Dig is audio only: a video extra plays its sound
+    assert plan.total - plain.total == pytest.approx(5.0 + recipes.EXTRA_BREATH + 7.0)
+
+
 def test_music_dips_while_someone_talks(tmp_path):
     music = audio.write_f32(tmp_path / "music.f32", np.full((RATE * 10, 2), 0.5, dtype=np.float32))
     silent = audio.write_f32(tmp_path / "voice.f32", np.zeros(RATE * 10, dtype=np.float32))

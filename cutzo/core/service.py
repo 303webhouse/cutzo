@@ -1145,6 +1145,232 @@ class Cutzo:
         return {**pick, "kind": key, "kind_label": self.PICK_KINDS[key], "start_text": fmt_time(pick["start"], precise=True),
                 "end_text": fmt_time(pick["end"], precise=True), "length": round(pick["end"] - pick["start"], 3)}
 
+    # ----------------------------------------------------------- extras
+    # One-off pieces for one episode (the haiku in Spooky Sode): a sound or video file, or a show-kit
+    # item, played at a time in the recording. Stored as ep["inserts"] (ep["extras"] holds the export's
+    # captions and chapter-list files); the recipes place them (recipes.extras_by_time).
+    EXTRA_KIND_WORDS = {"voice": "spoken", "music": "music", "video": "video"}
+    EXTRA_LIMIT = 600.0  # seconds, per extra
+
+    def _extra_kind(self, kind: Any) -> str | None:
+        k = str(kind or "").strip().lower()
+        if not k or k == "auto":
+            return None
+        if k in ("voice", "spoken", "speech", "talk", "talking", "voiceover", "voice-over", "voice over", "sound", "audio"):
+            return "voice"
+        if k in ("music", "song", "cue", "jingle"):
+            return "music"
+        if k in ("video", "clip", "picture"):
+            return "video"
+        raise CutzoError(f"“{kind}” isn't a kind of extra. Use spoken, music or video.")
+
+    def _extra_source(self, what: str, show: dict[str, Any]) -> dict[str, Any]:
+        """A file on this PC, or a show-kit item (by id or name): what it is and how long it lasts."""
+        raw = str(what or "").strip().strip('"').strip()
+        if not raw:
+            raise CutzoError("Say which file or show-kit item the extra is.")
+        path = Path(raw)
+        if path.is_file():
+            if kind_of(path) not in ("audio", "video"):
+                raise CutzoError(f"{path.name} isn't a sound or video file.")
+            info = ffmpeg.probe(path)
+            return {"file": str(path), "name": path.stem, "seconds": info.get("duration"),
+                    "has_sound": bool(info.get("audio")), "has_picture": bool(info.get("video")), "music": False}
+        want = raw.lower()
+        choices = [a for a in kit.list_assets(show.get("id")) if a["kind"] in ("audio", "video")]
+        exact = [a for a in choices if want in (a["id"], a["name"].lower(), a["name"].lower().rsplit(".", 1)[0])]
+        loose = exact or [a for a in choices if want in a["name"].lower() or want in a["id"]]
+        if len(loose) != 1:
+            if len(loose) > 1:
+                names = ", ".join(a["name"] for a in loose[:8])
+                raise CutzoError(f"“{raw}” matches several show-kit items: {names}. Say which one.")
+            raise NotFound(f"Can't find a file or show-kit item called “{raw}”.",
+                           hint="Paste the file's full path (in File Explorer: right-click it, Copy as path), "
+                                "or name a show-kit item such as Haiku Intro.")
+        asset = loose[0]
+        seconds, has_picture = asset.get("seconds"), asset["kind"] == "video"
+        has_sound = asset["kind"] == "audio"
+        src = kit.source_path(asset, self.drive)
+        if (seconds is None or has_picture) and src is not None and src.exists():
+            info = ffmpeg.probe(src)
+            seconds = seconds or info.get("duration")
+            has_sound = bool(info.get("audio"))
+        if not seconds:
+            raise CutzoError(f"Can't tell how long {asset['name']} is.",
+                             hint="Check that Google Drive is running and the file is in the show kit's folder.")
+        music = "music" in asset["use"].lower() or "cue" in asset["use"].lower()
+        return {"asset": asset["id"], "name": asset["name"].rsplit(".", 1)[0], "seconds": seconds,
+                "has_sound": has_sound, "has_picture": has_picture, "music": music}
+
+    def _extra_where(self, ep: dict[str, Any], time: Any, chapter: Any) -> tuple[float, str | None]:
+        """(recording time, chapter id or None): at a chapter (by id or title), or at a time, which counts
+        as the chapter there if one is within half a second."""
+        chapters = sorted(ep.get("chapters", []), key=lambda c: c["time"])
+        if chapter not in (None, ""):
+            want = " ".join(str(chapter).split()).lower()
+            found = [c for c in chapters if want in (c["id"].lower(), c["title"].lower())] or \
+                    [c for c in chapters if want in c["title"].lower()]
+            if len(found) != 1:
+                names = ", ".join(f"“{c['title']}”" for c in chapters) or "none yet"
+                raise NotFound(f"No single chapter matches “{chapter}”. Chapters: {names}.")
+            return float(found[0]["time"]), found[0]["id"]
+        if time in (None, ""):
+            raise CutzoError("Say where the extra goes: a time in the recording (like 41:20) or a chapter.")
+        t = parse_time(time, name="time")
+        kept = timeline.kept(float(ep["duration"]), self._cuts(ep))
+        if not kept or t >= kept[-1][1] - 0.5:
+            raise CutzoError(f"{fmt_time(t)} is at or after the end of the talk, so there's nothing to pause there.",
+                             hint="Pick an earlier time, or a chapter.")
+        near = next((c for c in chapters if abs(float(c["time"]) - t) <= 0.5), None)
+        return (float(near["time"]), near["id"]) if near else (round(t, 3), None)
+
+    def add_insert(self, episode: str, file: str, time: Any = None, chapter: Any = None, kind: Any = None,
+                   start: Any = None, end: Any = None, gain_db: Any = None, label: Any = None,
+                   source: str = "you") -> dict[str, Any]:
+        """Add an extra: a sound or video file (or a show-kit item) played at a time in the recording or at a
+        chapter. The talk pauses there; at a chapter it plays in the pause or music break before it."""
+        ep_id = self.resolve_episode(episode)
+        ep = self._load(ep_id)
+        self._require_built(ep)
+        if ep.get("sample"):
+            raise CutzoError("Extras work on real episodes; sample episodes are pretend.")
+        show = showlib.get_show(ep["show"]) or {}
+        what = self._extra_source(file, show)  # reads the file's details outside the lock
+        with self._lock:
+            ep = self._load(ep_id)
+            t, chapter_id = self._extra_where(ep, time, chapter)
+            whole = float(what["seconds"])
+            a = 0.0 if start in (None, "") else parse_time(start, name="start")
+            b = whole if end in (None, "") else min(parse_time(end, name="end"), whole)
+            if a >= whole:
+                raise CutzoError(f"It starts after the end of {what['name']} ({whole:.1f} s long).")
+            if b - a < 0.1:
+                raise CutzoError("The part to use must be longer than a tenth of a second.")
+            if b - a > self.EXTRA_LIMIT:
+                raise CutzoError(f"Keep an extra under {fmt_duration(self.EXTRA_LIMIT)}.",
+                                 hint="Use part of the file (a start and an end).")
+            k = self._extra_kind(kind) or ("video" if what["has_picture"] and show.get("recipe") == "the-new-heretics"
+                                           else "music" if what["music"] else "voice")
+            if k == "video" and not what["has_picture"]:
+                raise CutzoError(f"{what['name']} has no picture, so it can't be a video extra.",
+                                 hint="Make it spoken or music.")
+            if not what["has_sound"] and k != "video":
+                raise CutzoError(f"{what['name']} has no sound.")
+            try:
+                gain = 0.0 if gain_db in (None, "") else float(gain_db)
+            except (TypeError, ValueError):
+                raise CutzoError("The level change must be a number of decibels, like -3 or 2.") from None
+            if abs(gain) > 20:
+                raise CutzoError("Keep the level change between -20 and +20 dB.")
+            name = " ".join(str(label or "").split())[:80] or what["name"]
+            item = {"id": self._next_id(ep, "i"), "time": t, "chapter": chapter_id, "kind": k,
+                    "start": round(a, 3), "end": round(b, 3), "seconds": round(whole, 3), "gain_db": round(gain, 1),
+                    "label": name, "has_sound": what["has_sound"], "by": source, "at": now_iso()}
+            item.update({key: what[key] for key in ("file", "asset") if what.get(key)})
+            ep.setdefault("inserts", []).append(item)
+            view = self._insert_view(item, ep, show)
+            summary = f"Added {name} ({view['kind_label']}, {b - a:.1f} s) {view['where'][0].lower()}{view['where'][1:]}"
+            self._push_history(ep, {"op": "add_insert", "id": item["id"], "summary": summary})
+            self._save(ep)
+        self._log(source, "add_insert", f"{summary} in {_q(ep['title'], 40)}", ep_id)
+        layout = self._layout(ep, show)
+        return {"extra": view, "summary": summary,
+                "finished_length": fmt_duration(layout.total) if layout else None}
+
+    def remove_insert(self, episode: str, insert_id: str, source: str = "you") -> dict[str, Any]:
+        with self._lock:
+            ep = self._load(self.resolve_episode(episode))
+            item = next((x for x in ep.get("inserts") or [] if x["id"] == insert_id), None)
+            if not item:
+                raise NotFound(f"No extra called {insert_id!r} in this episode.")
+            ep["inserts"] = [x for x in ep["inserts"] if x["id"] != insert_id]
+            summary = f"Removed the extra {item['label']}"
+            self._push_history(ep, {"op": "remove_insert", "insert": item, "summary": summary})
+            self._save(ep)
+            for path in self._insert_files(ep["id"], insert_id).values():  # its working copies (made again on undo)
+                self.guard.writable(path).unlink(missing_ok=True)
+        self._log(source, "remove_insert", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
+        return {"summary": summary}
+
+    def _insert_view(self, item: dict[str, Any], ep: dict[str, Any], show: dict[str, Any]) -> dict[str, Any]:
+        chapters = sorted(ep.get("chapters", []), key=lambda c: c["time"])
+        chapter = next((c for c in chapters if c["id"] == item.get("chapter")), None)
+        t = float(chapter["time"]) if chapter else float(item["time"])
+        if chapter and chapter is chapters[0]:
+            where = "At the start of the talk"
+        elif chapter and (show.get("breaks_at") != "segments" or chapter.get("segment")):
+            where = f"In the break before “{chapter['title']}”"
+        elif chapter:
+            where = f"Before the new topic “{chapter['title']}”"
+        else:
+            where = f"At {fmt_time(t)} in the talk"
+        source = item.get("file") or (kit.get_asset(item.get("asset") or "") or {}).get("name") or item.get("asset")
+        length = float(item["end"]) - float(item["start"])
+        part = None
+        if float(item["start"]) > 0.05 or float(item["end"]) < float(item["seconds"]) - 0.05:
+            part = f"{fmt_time(item['start'], precise=True)}–{fmt_time(item['end'], precise=True)} of it"
+        return {**item, "where": where, "at_time": t, "time_text": fmt_time(t), "source": source,
+                "kind_label": self.EXTRA_KIND_WORDS.get(item.get("kind"), "spoken"), "length": round(length, 3),
+                "length_text": f"{length:.1f} s", "part": part}
+
+    def _insert_files(self, ep_id: str, insert_id: str) -> dict[str, Path]:
+        folder = self._ep_dir(ep_id) / "inserts"
+        return {"sound": folder / f"{insert_id}.f32", "sound_info": folder / f"{insert_id}.json",
+                "picture": folder / f"{insert_id}-1080p.mp4", "picture_info": folder / f"{insert_id}-1080p.json"}
+
+    def _insert_copy(self, ep_id: str, insert_id: str, which: str, make) -> Path:
+        """A working copy of an extra's file (just the part used), made the first time an export needs it and
+        again if the file changes; if the file has gone, the copy from last time still works."""
+        item = next((x for x in self._load(ep_id).get("inserts") or [] if x["id"] == insert_id), None)
+        if not item or not item.get("file"):
+            raise NotFound(f"No extra called {insert_id!r} in this episode.")
+        files = self._insert_files(ep_id, insert_id)
+        copy, info_path = self.guard.writable(files[which]), self.guard.writable(files[which + "_info"])
+        src = Path(item["file"])
+        want: dict[str, Any] = {"source": str(src), "start": item["start"], "end": item["end"]}
+        try:
+            stat = src.stat()
+        except OSError:
+            if copy.exists():
+                return copy
+            raise NotFound(f"Can't find the file for the extra {item['label']} ({src}).",
+                           hint="Put the file back, or remove the extra.") from None
+        want.update(size=stat.st_size, mtime=int(stat.st_mtime))
+        info = read_json(info_path)
+        if copy.exists() and isinstance(info, dict) and all(info.get(k) == v for k, v in want.items()):
+            return copy
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        tmp = copy.with_name(copy.stem + ".part" + copy.suffix)
+        try:
+            make(src, tmp, float(item["start"]), float(item["end"]) - float(item["start"]))
+            tmp.replace(copy)
+        finally:
+            tmp.unlink(missing_ok=True)
+        write_json(info_path, want)
+        return copy
+
+    def _insert_sound(self, ep_id: str, insert_id: str, check=None) -> Path:
+        """An extra's sound (the part used) as a stereo working file in the episode folder."""
+        return self._insert_copy(ep_id, insert_id, "sound", lambda src, dst, start, length: ffmpeg.decode(
+            src, dst, channels=2, start=start, length=length, check=check))
+
+    def _insert_loudness(self, ep_id: str, insert_id: str, check=None) -> float | None:
+        """How loud an extra is (LUFS, measured in stereo once per copy); None if too short or silent to tell."""
+        copy = self._insert_sound(ep_id, insert_id, check=check)
+        info_path = self.guard.writable(self._insert_files(ep_id, insert_id)["sound_info"])
+        info = read_json(info_path)
+        info = info if isinstance(info, dict) else {}
+        if "lufs" not in info:
+            lufs = ffmpeg.loudness(copy, channels=2, check=check, peak=False)["integrated"]
+            info["lufs"] = lufs if lufs > -69.0 else None
+            write_json(info_path, info)
+        return info["lufs"]
+
+    def _insert_picture(self, ep_id: str, insert_id: str, check=None, progress=None) -> Path:
+        """A video extra's picture (the part used) at 1080p, 29.97 fps, letterboxed if it isn't 16:9."""
+        return self._insert_copy(ep_id, insert_id, "picture", lambda src, dst, start, length: kit.fit_1080p(
+            src, dst, start=start, length=length, check=check, progress=progress))
+
     def swap_asset(self, episode: str, slot: str, asset: str, source: str = "you") -> dict[str, Any]:
         with self._lock:
             ep = self._load(self.resolve_episode(episode))
@@ -1216,6 +1442,14 @@ class Cutzo:
         if op == "remove_pick":
             ep.setdefault("picks", {}).setdefault(item["kind"], []).append(item["pick"])
             ep["picks"][item["kind"]].sort(key=lambda p: int(re.sub(r"\D", "", p["id"]) or 0))
+            return True
+        if op == "add_insert":
+            before = len(ep.get("inserts") or [])
+            ep["inserts"] = [x for x in ep.get("inserts") or [] if x["id"] != item["id"]]
+            return len(ep["inserts"]) < before
+        if op == "remove_insert":
+            ep.setdefault("inserts", []).append(item["insert"])
+            ep["inserts"].sort(key=lambda x: int(re.sub(r"\D", "", x["id"]) or 0))
             return True
         if op == "video_title":
             if item.get("before") is None:
@@ -1297,6 +1531,8 @@ class Cutzo:
             kit_dir = self.guard.writable(self.library / "kit")
 
             def kit_file(asset_id: str) -> Path:
+                if asset_id.startswith("insert:"):  # an extra: a file of Nick's
+                    return self._insert_sound(ep_id, asset_id[7:], check=ctx.check)
                 return kit.local_copy(asset_id, kit_dir=kit_dir, drive=self.drive, check=ctx.check)
 
             def length_of(asset_id: str) -> float:
@@ -1305,7 +1541,9 @@ class Cutzo:
                     return float(asset["seconds"])  # its picture: don't decode a long video's sound for this
                 return audio.Pcm(kit_file(asset_id), channels=2).duration
 
-            def loudness_of(asset_id: str) -> float:
+            def loudness_of(asset_id: str) -> float | None:
+                if asset_id.startswith("insert:"):
+                    return self._insert_loudness(ep_id, asset_id[7:], check=ctx.check)
                 return kit.loudness(asset_id, kit_dir=kit_dir, drive=self.drive, check=ctx.check)
 
             layout = recipes.plan_episode(ep, show, voice_path=voice_path, talk_lufs=talk, kit_file=kit_file,
@@ -1429,14 +1667,21 @@ class Cutzo:
         sound goes in and the file is checked."""
         work_dir.mkdir(parents=True, exist_ok=True)
         needs = videolib.needed(layout.picture) if layout.picture else {}
+
+        def video_copy(asset_id: str, until: float, progress=None) -> Path:
+            if asset_id.startswith("insert:"):  # a video extra: a file of Nick's
+                return self._insert_picture(ep["id"], asset_id[7:], check=check, progress=progress)
+            return kit.video_copy(asset_id, kit_dir=kit_dir, drive=self.drive, until=until, check=check,
+                                  progress=progress)
+
         for k, (asset_id, until) in enumerate(sorted(needs.items())):
-            name = (kit.get_asset(asset_id) or {}).get("name", asset_id)
+            name = (kit.get_asset(asset_id) or {}).get("name") or next(
+                (x["label"] for x in ep.get("inserts") or [] if f"insert:{x['id']}" == asset_id), asset_id)
             step("Preparing the show's videos", 0.02 + 0.13 * k / max(1, len(needs)),
                  f"{name} at 1080p (only the first time; the copy is kept)")
-            kit.video_copy(asset_id, kit_dir=kit_dir, drive=self.drive, until=until, check=check,
-                           progress=lambda p, k=k, name=name: step("Preparing the show's videos",
-                                                                   0.02 + 0.13 * (k + p) / max(1, len(needs)),
-                                                                   f"{name} at 1080p (only the first time)"))
+            video_copy(asset_id, until, progress=lambda p, k=k, name=name: step(
+                "Preparing the show's videos", 0.02 + 0.13 * (k + p) / max(1, len(needs)),
+                f"{name} at 1080p (only the first time)"))
         sound, picture = work_dir / "video-sound.m4a", work_dir / "picture.mp4"
         stop = threading.Event()
         done: dict[str, Any] = {}
@@ -1462,9 +1707,7 @@ class Cutzo:
         try:
             videolib.render_video(
                 layout, audio_path=None, mix_path=mix_path, talk_lufs=talk, dst=picture, video=spec["video"],
-                kit_video=lambda asset_id, until: kit.video_copy(asset_id, kit_dir=kit_dir, drive=self.drive,
-                                                                until=until, check=check),
-                title_lines=titles.lines_for(ep), work_dir=work_dir, check=check, faststart=False,
+                kit_video=video_copy, title_lines=titles.lines_for(ep), work_dir=work_dir, check=check, faststart=False,
                 progress=lambda p: step("Drawing the video", 0.15 + 0.78 * p, drawing))
         except BaseException:
             stop.set()
@@ -2076,6 +2319,8 @@ class Cutzo:
             "build_notes": ep.get("build_notes", []),
             "picks": {key: [self._pick_view(p, key) for p in (ep.get("picks") or {}).get(key, [])]
                       for key in self.PICK_KINDS},
+            "inserts": sorted((self._insert_view(x, ep, show) for x in ep.get("inserts") or []),
+                              key=lambda v: v["at_time"]),
             "can_undo": bool(ep.get("history")),
             "last_change": (ep.get("history") or [{}])[-1].get("summary"),
             "jobs": self.jobs.list(limit=5, episode=ep["id"]),
