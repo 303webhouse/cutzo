@@ -125,13 +125,13 @@ def test_export_and_confirm(cutzo):
     job = cutzo.jobs.wait(res["job"]["id"])
     assert job["status"] == "done", job
     view = cutzo.get_episode(SPOOKY)
-    assert {x["target"] for x in view["exports"]} == {"youtube-4k", "podcast-mp3"}
+    assert {x["target"] for x in view["exports"]} == {"youtube-1080p", "podcast-mp3"}  # "youtube" is 1080p now
     assert all(not x["written"] for x in view["exports"])
     for x in view["exports"]:
         assert cutzo.guard.is_writable(x["file"])
     with pytest.raises(NeedsConfirmation):
-        cutzo.export(SPOOKY, ["youtube-4k"])
-    again = cutzo.export(SPOOKY, ["youtube-4k"], confirm=True)
+        cutzo.export(SPOOKY, ["youtube-1080p"])
+    again = cutzo.export(SPOOKY, ["youtube-1080p"], confirm=True)
     assert cutzo.jobs.wait(again["job"]["id"])["status"] == "done"
     assert cutzo.check_export(episode=SPOOKY, target="youtube")["passed"] is True
     with pytest.raises(CutzoError):

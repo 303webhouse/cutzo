@@ -60,12 +60,28 @@ def test_modules_import_on_their_own():
 def test_tool_registry_and_status():
     assert tools.platform_key().count("-") == 1
     names = {t["tool"] for t in tools.status()}
-    assert names == {"ffmpeg", "deep-filter"}
+    assert names == {"ffmpeg", "deep-filter", "whisper", "parakeet-model"}
+    assert not set(tools.RETIRED) & names
     for tool in tools.TOOLS.values():
         for d in tool.downloads.values():
-            assert len(d.sha256) == 64 and d.url.startswith("https://github.com/")
+            assert len(d.sha256) == 64 and d.size > 0
+            assert d.url.startswith(("https://github.com/", "https://huggingface.co/ggml-org/parakeet-GGUF/resolve/3515645"))
+            assert d.kind in ("zip", "tar.gz", "exe", "file")
     with pytest.raises(KeyError):
         tools.find("photoshop")
+
+
+def test_speech_model_can_come_from_an_environment_variable(monkeypatch, tmp_path):
+    monkeypatch.setenv("CUTZO_TOOLS", str(tmp_path / "tools"))
+    monkeypatch.delenv("CUTZO_PARAKEET_MODEL", raising=False)
+    assert tools.find_file("parakeet-model") is None
+    with pytest.raises(CutzoError) as err:
+        tools.require_file("parakeet-model")
+    assert "Update Cutzo" in (err.value.hint or "")
+    model = tmp_path / "model.bin"
+    model.write_bytes(b"x")
+    monkeypatch.setenv("CUTZO_PARAKEET_MODEL", str(model))
+    assert tools.find_file("parakeet-model") == model and tools.available("parakeet-model")
 
 
 def test_require_explains_how_to_install(monkeypatch, tmp_path):
@@ -231,6 +247,27 @@ def test_dig_layout_matches_season_debrief_part_2():
     assert plan.duck_db == recipes.THE_DIG["duck_db"] > 0  # music dips under voices (Nick, Oct 14)
 
 
+def test_dig_extras_play_between_the_theme_and_the_stinger():
+    from cutzo.core import shows
+
+    show = shows.get_show("the-dig")
+    ep = _ep(chapters=(0, 200, 400))
+    ep["chapters"] = [{"id": f"c{n}", **c} for n, c in enumerate(ep["chapters"])]
+    plain = recipes.plan_episode(ep, show, voice_path=Path("v.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
+                                 kit_file=lambda a: Path(a), length_of=lambda a: 1e9)
+    ep["inserts"] = [{"id": "i1", "file": "drop.wav", "chapter": "c1", "time": 200, "kind": "voice", "seconds": 5.0},
+                     {"id": "i2", "file": "clip.mp4", "time": 300.0, "kind": "video", "seconds": 7.0}]
+    plan = recipes.plan_episode(ep, show, voice_path=Path("v.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
+                                kit_file=lambda a: Path(a), length_of=lambda a: 1e9)
+    drop, clip = sorted((p for p in plan.pieces if p.label == "Extra"), key=lambda p: p.at)
+    theme = [p for p in plan.pieces if p.label == "Theme (break)"][0]
+    stinger = [p for p in plan.pieces if p.label == "Stinger"][0]
+    assert drop.at == pytest.approx(theme.at + recipes.THE_DIG["break"]["lead_in"] + recipes.THE_DIG["break"]["alone"])
+    assert stinger.at == pytest.approx(drop.until + recipes.EXTRA_BREATH)
+    assert clip.length == 7.0 and plan.picture is None  # The Dig is audio only: a video extra plays its sound
+    assert plan.total - plain.total == pytest.approx(5.0 + recipes.EXTRA_BREATH + 7.0)
+
+
 def test_music_dips_while_someone_talks(tmp_path):
     music = audio.write_f32(tmp_path / "music.f32", np.full((RATE * 10, 2), 0.5, dtype=np.float32))
     silent = audio.write_f32(tmp_path / "voice.f32", np.zeros(RATE * 10, dtype=np.float32))
@@ -288,6 +325,27 @@ def test_encode_keeps_peaks_under_the_limiter_ceiling(tmp_path):
                           ceiling_db=-6.0)
     assert lower["ceiling_db"] == -6.0
     assert render.check_file(dst, spec)["loudness"]["true_peak"] < -3.0
+
+
+@needs_ffmpeg
+def test_encode_lands_on_the_loudness_target_even_when_the_limiter_works_hard(tmp_path):
+    """The limiter takes loudness away from peaky sound; the gain is corrected before encoding,
+    so one encode is enough (Spooky Sode's first 14-minute AAC encode missed and had to be redone)."""
+    from cutzo.core import presets
+
+    spec = presets.get_preset("youtube-1080p")["spec"]
+    rng = np.random.default_rng(3)
+    t = np.arange(RATE * 12) / RATE
+    x = 0.05 * np.sin(2 * np.pi * 150 * t) * (np.sin(2 * np.pi * 2 * t) > 0) + 0.02 * rng.normal(size=len(t))
+    x[:: RATE // 10] += 0.95  # sharp clicks far above the loudness
+    mix = audio.write_f32(tmp_path / "mix.f32", np.stack([x, x], 1).astype(np.float32))
+    dst = tmp_path / "out.m4a"
+    made = render.encode(mix, dst, spec, tags={"title": "t"}, chapters=[], total=12.0)
+    plain = spec["loudness"] - made["before"]["integrated"]
+    assert made["gain_db"] > plain + 2.0  # the limiter's loss was made up
+    checked = render.check_file(dst, spec)
+    assert abs(checked["loudness"]["integrated"] - spec["loudness"]) <= 0.2
+    assert checked["loudness"]["true_peak"] <= spec["true_peak_max"]
 
 
 # ------------------------------------------------------------- kit copies

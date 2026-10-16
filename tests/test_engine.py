@@ -70,6 +70,10 @@ def test_errors_are_plain_words(client):
     assert big.status_code == 409
     failed = client.get("/api/activity?reads=false&limit=1").json()["entries"][0]
     assert failed["ok"] is False and failed["summary"].startswith("Paused")
+    extra = client.post("/api/episodes/spooky/extras", json={"file": "Haiku Intro", "time": "0:20"}, headers=APP)
+    assert extra.status_code == 400 and "real episodes" in extra.json()["error"]  # sample episodes are pretend
+    gone = client.delete("/api/episodes/spooky/extras/i99", headers=APP)
+    assert gone.status_code == 404 and "No extra" in gone.json()["error"]
 
 
 def test_jobs_and_state(client, cutzo):

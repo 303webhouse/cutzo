@@ -19,7 +19,7 @@ import threading
 import traceback
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Optional, Union
 from urllib.parse import urlparse
 
 from . import __version__
@@ -87,6 +87,17 @@ class CameraBody(BaseModel):
 class ChapterBody(BaseModel):
     time: TimeValue
     title: str
+    segment: bool | None = None
+
+
+class SegmentBody(BaseModel):
+    segment: bool = True
+
+
+class VideoTitleBody(BaseModel):
+    label: str | None = None
+    title: str | None = None
+    guests: str | None = None
 
 
 class AssetBody(BaseModel):
@@ -118,6 +129,17 @@ class PickBody(BaseModel):
     kind: str
     start: TimeValue
     end: TimeValue
+
+
+class ExtraBody(BaseModel):
+    file: str
+    time: TimeValue | None = None
+    chapter: str | None = None
+    kind: str | None = None
+    start: TimeValue | None = None
+    end: TimeValue | None = None
+    gain_db: float | None = None
+    label: str | None = None
 
 
 class RevealBody(BaseModel):
@@ -239,8 +261,14 @@ def create_app(cutzo: Cutzo, *, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         return cutzo.build_episode(episode, body.template, source=source_of(request))
 
     @app.get("/api/episodes/{episode}/transcript")
-    def transcript(episode: str, request: Request, include_cut: bool = False, format: str = "text"):
-        return cutzo.get_transcript(episode, include_cut=include_cut, fmt=format, source=source_of(request))
+    def transcript(episode: str, request: Request, include_cut: bool = False, format: str = "text",
+                   start: Optional[str] = None, end: Optional[str] = None):
+        return cutzo.get_transcript(episode, include_cut=include_cut, fmt=format, source=source_of(request),
+                                    start=start, end=end)
+
+    @app.post("/api/episodes/{episode}/transcribe")
+    def transcribe(episode: str, request: Request):
+        return cutzo.transcribe(episode, source=source_of(request))
 
     @app.get("/api/episodes/{episode}/waveform")
     def waveform(episode: str, buckets: int = 1200, start: float | None = None, end: float | None = None):
@@ -267,6 +295,15 @@ def create_app(cutzo: Cutzo, *, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     def remove_pick(episode: str, pick_id: str, request: Request):
         return cutzo.remove_pick(episode, pick_id, source=source_of(request))
 
+    @app.post("/api/episodes/{episode}/extras")
+    def add_extra(episode: str, body: ExtraBody, request: Request):
+        return cutzo.add_insert(episode, body.file, body.time, body.chapter, body.kind, body.start, body.end,
+                                body.gain_db, body.label, source=source_of(request))
+
+    @app.delete("/api/episodes/{episode}/extras/{insert_id}")
+    def remove_extra(episode: str, insert_id: str, request: Request):
+        return cutzo.remove_insert(episode, insert_id, source=source_of(request))
+
     @app.post("/api/episodes/{episode}/cuts")
     def cut_section(episode: str, body: CutBody, request: Request):
         return cutzo.cut_section(episode, body.start, body.end, source=source_of(request), reason=body.reason,
@@ -286,7 +323,15 @@ def create_app(cutzo: Cutzo, *, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.post("/api/episodes/{episode}/chapters")
     def add_chapter(episode: str, body: ChapterBody, request: Request):
-        return cutzo.add_chapter(episode, body.time, body.title, source=source_of(request))
+        return cutzo.add_chapter(episode, body.time, body.title, source=source_of(request), segment=body.segment)
+
+    @app.post("/api/episodes/{episode}/chapters/{chapter_id}/segment")
+    def set_segment(episode: str, chapter_id: str, body: SegmentBody, request: Request):
+        return cutzo.set_segment(episode, chapter_id, body.segment, source=source_of(request))
+
+    @app.post("/api/episodes/{episode}/video-title")
+    def set_video_title(episode: str, body: VideoTitleBody, request: Request):
+        return cutzo.set_video_title(episode, body.label, body.title, body.guests, source=source_of(request))
 
     @app.delete("/api/episodes/{episode}/chapters/{chapter_id}")
     def remove_chapter(episode: str, chapter_id: str, request: Request):
@@ -311,6 +356,12 @@ def create_app(cutzo: Cutzo, *, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     @app.post("/api/reveal")
     def reveal(body: RevealBody):
         return cutzo.reveal(body.file)
+
+    @app.get("/api/episodes/{episode}/exports/{target}/file")
+    def export_file(episode: str, target: str):
+        # A finished export, played on the Export tab (FileResponse answers range requests, so seeking works)
+        path, media_type = cutzo.export_file(episode, target)
+        return FileResponse(path, media_type=media_type)
 
     # ------------------------------------------------------------- jobs
     @app.get("/api/jobs")
