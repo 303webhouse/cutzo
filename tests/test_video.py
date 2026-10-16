@@ -535,6 +535,9 @@ def test_extras_in_a_real_episode(heretics, tmp_path):
         app.restore_cut(ep_id, e["id"])
     app.add_chapter(ep_id, 0, "Start")
     app.add_chapter(ep_id, 15.0, "Next segment", segment=True)
+    teaser = app.add_pick(ep_id, "cold open", 10.0, 12.0)  # The New Heretics calls it the teaser
+    assert teaser["summary"].endswith("to the teaser")
+    app.remove_pick(ep_id, teaser["pick"]["id"])
     before = app.get_episode(ep_id)["finished_duration"]
     clip = tmp_path / "Reaction clip.mp4"
     _make_video(clip, 4.0, "magenta", sound=True)

@@ -2,12 +2,27 @@
 // transcript, which you mark up like a script: select words to cut them, click
 // struck words to bring them back. Real episodes also get a zoomed waveform for precise
 // selections, a switch to hear the original sound, and a panel above the transcript with
-// the cold open, sign-off and dead-air settings (the panel alone until they're transcribed).
+// the cold open (or teaser), sign-off and dead-air settings (the panel alone until they're transcribed).
 
 import { api, epPath } from "../api.js";
 import { h, add, clear, icons, fmtTime, fmtDur, plural, toast, toastError, confirmDialog } from "../ui.js";
 
 const REASON = { "dead air": "Dead air", "filler word": "Filler word", words: "Words", manual: "Section", chosen: "Chosen" };
+// How each show opens and closes with stretches you pick from the talk (the API calls them cold_open and outro).
+const PICK_WORDS = {
+  "the-dig": {
+    open: "Cold open", openAbout: "Highlights that open the episode over the theme, before the sound bites.",
+    openEmpty: "None yet. Season Debrief Part 2 opened with three short highlights from late in the show.",
+    closeAbout: "Plays at the very end, after the conversation, over the theme.",
+    closeEmpty: "None yet. Optional: the theme ends the episode either way.",
+  },
+  "the-new-heretics": {
+    open: "Teaser", openAbout: "Highlights from the talk that open the episode with the spectrum, before the montage.",
+    openEmpty: "None yet. Spooky Sode's teaser was three short clips from late in the show, about 18 s in all.",
+    closeAbout: "Plays after the talk, over Full Flames and the quiet ending music.",
+    closeEmpty: "None yet. Optional: the ending music and flames close the episode either way.",
+  },
+};
 const BY = { auto: "Suggested by Cutzo", you: "You", claude: "Claude" };
 const CAM_COLORS = ["#8ec5ff", "#ffcf6e", "#9ee6b8", "#f6a7c8", "#c7b8ff", "#ffb48a"];
 const SHOW_LOOK = {
@@ -220,11 +235,11 @@ export function mountReview(container, initialEp, ctx) {
     nowIndex = -1;
   }
 
-  // Real episodes: the cold open, the sign-off and how tight the dead-air trimming is.
+  // Real episodes: the cold open (The New Heretics' teaser), the sign-off and how tight the dead-air trimming is.
   function drawPanel() {
     clear(panelBox);
-    const recipe = ep.show === "the-dig";
-    if (recipe) {
+    const words = PICK_WORDS[ep.show];
+    if (words) {
       const picks = ep.picks || { cold_open: [], outro: [] };
       const list = (key, title, about, empty) => {
         const items = picks[key] || [];
@@ -246,12 +261,11 @@ export function mountReview(container, initialEp, ctx) {
       };
       add(panelBox, [
         h("div", { class: "script-head" }, h("h3", {}, "How the episode opens and closes"),
-          h("p", {}, "Drag across the waveform, then choose Add to cold open or Add to sign-off.")),
+          h("p", {}, `${ep.has_transcript ? "Select words in the transcript, or drag across the waveform" : "Drag across the waveform"}, `
+            + `then choose Add to ${words.open.toLowerCase()} or Add to sign-off.`)),
         h("div", { class: "two-col" },
-          list("cold_open", "Cold open", "Highlights that open the episode over the theme, before the sound bites.",
-            "None yet. Season Debrief Part 2 opened with three short highlights from late in the show."),
-          list("outro", "Sign-off", "Plays at the very end, after the conversation, over the theme.",
-            "None yet. Optional: the theme ends the episode either way.")),
+          list("cold_open", words.open, words.openAbout, words.openEmpty),
+          list("outro", "Sign-off", words.closeAbout, words.closeEmpty)),
       ]);
     }
     const da = ep.dead_air || { longer_than: 1, keep: 0.5 };
@@ -260,7 +274,7 @@ export function mountReview(container, initialEp, ctx) {
     const deadCuts = ep.edits.filter((e) => e.type === "cut" && e.reason === "dead air");
     const saved = deadCuts.reduce((t, e) => t + e.length, 0);
     add(panelBox, [
-      h("div", { class: "script-head", style: { marginTop: recipe ? "18px" : "0" } }, h("h3", {}, "Dead air"),
+      h("div", { class: "script-head", style: { marginTop: words ? "18px" : "0" } }, h("h3", {}, "Dead air"),
         h("p", {}, `${plural(deadCuts.length, "long silence")} shortened, ${fmtDur(saved)} out`)),
       h("form", {
         class: "dead-air",
@@ -717,11 +731,11 @@ export function mountReview(container, initialEp, ctx) {
       h("button", { class: "btn btn-cut btn-small", onclick: () => cutRange(a, b, selection.source === "text" ? "words" : "manual") }, "Cut section"),
       h("button", { class: "btn btn-small", onclick: () => prefillChapter(a) }, "Add chapter at start"),
     ];
-    if (real && ep.show === "the-dig") {
+    if (real && PICK_WORDS[ep.show]) {
       const pick = (kind) => ctx.act(() => api(`${epPath(ep.id)}/picks`, { method: "POST", body: { kind, start: a, end: b } }),
         (r) => `${r.summary}. Now ${r.total}.`).then((r) => { if (r) { selection = null; drawSelbar(); draw(true); } });
       parts.push(
-        h("button", { class: "btn btn-small", onclick: () => pick("cold_open") }, "Add to cold open"),
+        h("button", { class: "btn btn-small", onclick: () => pick("cold_open") }, `Add to ${PICK_WORDS[ep.show].open.toLowerCase()}`),
         h("button", { class: "btn btn-small", onclick: () => pick("outro") }, "Add to sign-off"));
     }
     if ((ep.cameras || []).length) {
@@ -1220,6 +1234,8 @@ export function mountReview(container, initialEp, ctx) {
       if (cutsChanged || rebuilt) {
         cutSignature = signature;
         drawScript();
+      } else if (real) {
+        drawPanel(); // the teaser / cold open and sign-off lists (drafts in the dead-air boxes are kept)
       }
       drawSide();
       drawFlags();

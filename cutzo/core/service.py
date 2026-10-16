@@ -1087,6 +1087,10 @@ class Cutzo:
     PICK_KINDS = {"cold_open": "cold open", "outro": "sign-off"}
     PICK_LIMITS = {"cold_open": 45.0, "outro": 90.0}
 
+    def _pick_word(self, ep: dict[str, Any], key: str) -> str:
+        """What the show calls a pick: The New Heretics opens with a teaser, The Dig with a cold open."""
+        return "teaser" if key == "cold_open" and ep.get("show") == "the-new-heretics" else self.PICK_KINDS[key]
+
     def _pick_kind(self, kind: str) -> str:
         k = str(kind or "").strip().lower().replace("-", " ").replace("_", " ")
         if k in ("cold open", "coldopen", "teaser", "highlight", "highlights", "intro", "opening", "open"):
@@ -1112,12 +1116,12 @@ class Cutzo:
             total = sum(p["end"] - p["start"] for p in picks) + (b - a)
             limit = self.PICK_LIMITS[key]
             if total > limit:
-                raise CutzoError(f"The {self.PICK_KINDS[key]} would run {fmt_duration(total)}; keep it under "
+                raise CutzoError(f"The {self._pick_word(ep, key)} would run {fmt_duration(total)}; keep it under "
                                  f"{fmt_duration(limit)}.", hint="Pick a shorter stretch, or remove one first.")
             pick = {"id": self._next_id(ep, "p"), "start": round(a, 3), "end": round(b, 3), "by": source, "at": now_iso()}
             picks.append(pick)
             summary = (f"Added {fmt_time(a, precise=True)}–{fmt_time(b, precise=True)} ({b - a:.1f} s) "
-                       f"to the {self.PICK_KINDS[key]}")
+                       f"to the {self._pick_word(ep, key)}")
             self._push_history(ep, {"op": "add_pick", "kind": key, "id": pick["id"], "summary": summary})
             self._save(ep)
         self._log(source, "add_pick", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
@@ -1135,7 +1139,7 @@ class Cutzo:
             else:
                 raise NotFound(f"No cold-open or sign-off pick called {pick_id!r} in this episode.")
             summary = (f"Removed {fmt_time(pick['start'], precise=True)}–{fmt_time(pick['end'], precise=True)} "
-                       f"from the {self.PICK_KINDS[key]}")
+                       f"from the {self._pick_word(ep, key)}")
             self._push_history(ep, {"op": "remove_pick", "kind": key, "pick": pick, "summary": summary})
             self._save(ep)
         self._log(source, "remove_pick", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
