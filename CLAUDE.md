@@ -121,6 +121,10 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
     `<episode>/inserts/` (`<id>.f32`, `<id>-1080p.mp4` letterboxed by `kit.fit_1080p`). Levels:
     spoken and video as loud as the talk, music 3 dB below (The New Heretics: 3.2), kit cues at
     Nick's own level. The review player doesn't play extras; the finished file has them.
+  - The Review tab's picture is only a sketch that follows the sound; the real video exists once
+    exported. The Export tab plays finished files ("Watch it here" / "Listen here") through
+    `GET /api/episodes/{ep}/exports/{target}/file` (`Cutzo.export_file`: only files inside the
+    library; Starlette's FileResponse answers range requests, so seeking a 10 GB file works).
 - Episode folders hold `voice.f32` (cleaned talk, recording time), `original.f32`, the two
   previews, `transcript.json`, `waveform-*.json` caches and `inserts/` (extras' copies). Exports
   render `mix.f32` then delete it (video exports also use `work-export/`, deleted after).
