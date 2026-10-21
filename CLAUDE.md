@@ -144,6 +144,12 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
   open leaves the music and bites on their cue; a longer one moves theme, bites and talk later by as much.
   Breaks use a different part of the song each (`break.theme_starts`, three parts). The sign-off is his
   "cold out": a funny clip over the ending music, cut from the talk so it isn't heard twice.
+- Review never scrolls the page by itself (Nick, Oct 21): while playing, a "Back to the words being read"
+  button appears when the word is off screen; after clicking it the page follows until he scrolls.
+- Hearing the music on Review (Oct 21): `Cutzo.section_preview` mixes just the opening or the ending of the
+  finished layout (`render.mix(window=...)`, levelled to the MP3's loudness) into `section-<which>.m4a`
+  (route `/section-preview`, played via `/section-audio`). `set_sign_off_timing` (`ep["sign_off_after"]`,
+  The Dig's default 3 s) moves the cold out against the ending music; both sit under the picks on Review.
 - Episode folders hold `voice.f32` (cleaned talk, recording time), `original.f32`, the two
   previews, `transcript.json`, `waveform-*.json` caches and `inserts/` (extras' copies). Exports
   render `mix.f32` then delete it (video exports also use `work-export/`, deleted after).

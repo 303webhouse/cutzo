@@ -468,6 +468,27 @@ def test_real_build_review_and_export(real_episode):
     app.remove_pick(ep_id, cold["pick"]["id"])
     app.add_pick(ep_id, "cold open", 40, 44)
 
+    # Listening to the ending and the opening with the music, and timing the sign-off against it.
+    ending = app.section_preview(ep_id, "ending")
+    heard = app.section_audio(ep_id, "ending")
+    assert heard.name == "section-ending.m4a" and not (heard.parent / "section-ending.f32").exists()
+    probe = json.loads(subprocess.run([str(tools.find("ffprobe")), "-v", "error", "-show_entries", "format=duration",
+                                       "-of", "json", str(heard)], capture_output=True, text=True).stdout)
+    assert float(probe["format"]["duration"]) == pytest.approx(ending["to"] - ending["from"], abs=0.2)
+    assert ending["talk_ends_at"] == pytest.approx(30.0, abs=0.01)
+    opening = app.section_preview(ep_id, "opening")
+    assert opening["from"] == 0 and opening["talk_starts_at"] > 50
+    with pytest.raises(CutzoError):
+        app.section_preview(ep_id, "middle")
+    assert app.get_episode(ep_id)["sign_off_after"] == 3.0
+    longer = app.set_sign_off_timing(ep_id, 8)
+    assert longer["after_talk"] == 8 and app.get_episode(ep_id)["sign_off_after"] == 8
+    assert app.section_preview(ep_id, "ending")["to"] == pytest.approx(ending["to"] + 5, abs=0.05)
+    with pytest.raises(CutzoError):
+        app.set_sign_off_timing(ep_id, 60)
+    app.undo(ep_id)
+    assert app.get_episode(ep_id)["sign_off_after"] == 3.0
+
     with pytest.raises(CutzoError):
         app.export(ep_id, ["youtube-4k"])  # video is Phase 3
     job = app.jobs.wait(app.export(ep_id, ["podcast-mp3"])["job"]["id"], 300)
@@ -569,3 +590,19 @@ def test_engine_routes_for_real_episodes(real_episode):
         assert client.post(f"/api/episodes/{ep_id}/dead-air", json={"longer_than": 1.2}, headers=app_headers).status_code == 200
         assert client.post(f"/api/episodes/{ep_id}/voice", json={"strength": 40}, headers=app_headers).json()["needs_rebuild"]
         assert client.post("/api/reveal", json={"file": "C:/Windows/notepad.exe"}, headers=app_headers).status_code == 404
+
+
+def test_sign_off_timing_moves_the_cold_out():
+    from cutzo.core import shows
+
+    show = shows.get_show("the-dig")
+    ep = _ep(chapters=(0, 200), outro=((580, 590),))
+    def sign_off(e):
+        plan = recipes.plan_episode(e, show, voice_path=Path("v.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
+                                    kit_file=lambda a: Path(a), length_of=lambda a: 1e9)
+        return plan, [p for p in plan.pieces if p.label == "Sign-off"][0]
+    plan, clip = sign_off(ep)
+    assert clip.at == pytest.approx(plan.talk_end + recipes.THE_DIG["outro"]["clips_after"])
+    ep["sign_off_after"] = 9.5
+    plan, clip = sign_off(ep)
+    assert clip.at == pytest.approx(plan.talk_end + 9.5)

@@ -205,18 +205,24 @@ def conversation(voice_path: Path, kept: list[tuple[float, float]], at: float,
 
 
 def mix(plan: Plan, dst: Path, *, check: Callable[[], None] | None = None,
-        progress: Callable[[float], None] | None = None) -> Path:
-    """Mix every piece into one stereo working file (interleaved .f32, 48 kHz)."""
+        progress: Callable[[float], None] | None = None, window: tuple[float, float] | None = None) -> Path:
+    """Mix every piece into one stereo working file (interleaved .f32, 48 kHz). With `window` (start, end in
+    finished-file seconds), only that stretch, starting at 0 (to listen to the opening or the ending)."""
     rate = audio.RATE
-    frames = int(np.ceil(plan.total * rate)) + 1
+    if window:
+        base = max(0, int(round(window[0] * rate)))
+        frames = max(1, int(np.ceil(min(window[1], plan.total) * rate)) - base)
+    else:
+        base, frames = 0, int(np.ceil(plan.total * rate)) + 1
     out = np.memmap(dst, dtype="<f4", mode="w+", shape=(frames, 2))
     block = audio.BLOCK
     sources: dict[tuple[Path, int], np.ndarray] = {}
     spans = plan.voice_spans() if plan.duck_db > 0 else []
-    for pos in range(0, frames, block):
+    for opos in range(0, frames, block):
         if check:
             check()
-        end = min(frames, pos + block)
+        pos = base + opos
+        end = min(base + frames, pos + block)
         acc = np.zeros((end - pos, 2), dtype=np.float32)
         t0, t1 = pos / rate, end / rate
         for p in plan.pieces:
@@ -251,9 +257,9 @@ def mix(plan: Plan, dst: Path, *, check: Callable[[], None] | None = None,
             if p.channels == 1:
                 seg = np.repeat(seg, 2, axis=1) if seg.ndim == 2 else np.stack([seg, seg], axis=1)
             acc[a - pos:a - pos + n] += seg[:, :2] * gain[:, None]
-        out[pos:end] = acc
+        out[opos:opos + (end - pos)] = acc
         if progress:
-            progress(end / frames)
+            progress((end - base) / frames)
     out.flush()
     del out
     return dst

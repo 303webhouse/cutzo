@@ -381,7 +381,7 @@ def plan_episode(ep: dict[str, Any], show: dict[str, Any], *, voice_path: Path, 
             stinger_at[t] = at
 
     # ---- the ending: theme under the last words, sign-off clips, theme fades away
-    cursor = talk_end + end["clips_after"]
+    cursor = talk_end + float(ep.get("sign_off_after", end["clips_after"]))
     for k, (a, b) in enumerate(outro):
         plan.pieces.append(render.Piece(src=voice_path, channels=1, start=a, end=b, at=cursor - (render.XFADE if k else 0),
                                         gain_db=end["clips_gain_db"], fade_in=render.XFADE if k else 0.05,

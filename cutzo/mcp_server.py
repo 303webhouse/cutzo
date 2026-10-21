@@ -322,6 +322,17 @@ def set_recording_order(
 
 
 @server.tool(annotations=CHANGE, structured_output=False)
+def set_sign_off_timing(
+    episode: Episode,
+    after_talk: Annotated[float, Field(description="Seconds after the last words of the talk (0 to 40; The Dig's usual is 3).")],
+) -> dict[str, Any]:
+    """When the sign-off clips (the cold out) start over the ending music, counted from the end of the talk.
+    Use it to land a clip on a moment in the music."""
+    res = engine.call("POST", _ep(episode) + "/sign-off-timing", {"after_talk": after_talk})
+    return {"done": res["summary"]}
+
+
+@server.tool(annotations=CHANGE, structured_output=False)
 def build_episode(
     episode: Episode,
     template: Annotated[str | None, Field(description="Optional show template to use; defaults to the episode's show.")] = None,

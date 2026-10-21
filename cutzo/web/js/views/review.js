@@ -47,7 +47,8 @@ export function mountReview(container, initialEp, ctx) {
   let freq = null;
   let skipCuts = true;
   let nowIndex = -1;
-  let followWords = true; // the page follows the word being read (see setFollow)
+  const sectionDraft = { which: null, url: null, info: null, busy: null, after: null, play: false };
+  let followWords = false; // the page follows the word being read only after you ask (see setFollow)
   let autoScrollUntil = 0;
   let lastDraw = 0;
   let drag = null;
@@ -270,6 +271,7 @@ export function mountReview(container, initialEp, ctx) {
         h("div", { class: "two-col" },
           list("cold_open", words.open, words.openAbout, words.openEmpty),
           list("outro", "Sign-off", words.closeAbout, words.closeEmpty)),
+        hearWithMusic(),
       ]);
     }
     const da = ep.dead_air || { longer_than: 1, keep: 0.5 };
@@ -296,6 +298,66 @@ export function mountReview(container, initialEp, ctx) {
         `waveform; the close-up under it shows ${zoom.span} seconds around the playhead for precise selections. Keys: Space `,
         "plays or pauses, the arrow keys move a second (Shift for five), Ctrl+Z undoes the last change."),
     ]);
+  }
+
+  // The player above plays only the talk. These mix the opening or the ending with the show's music (a few
+  // seconds of work in the engine), so clips can be picked and timed against it.
+  function hearWithMusic() {
+    const box = h("div", { class: "hear-music" });
+    const draw = () => {
+      clear(box);
+      const make = (which) => async () => {
+        sectionDraft.busy = which;
+        draw();
+        try {
+          const r = await api(`${epPath(ep.id)}/section-preview`, { method: "POST", body: { which } });
+          Object.assign(sectionDraft, { which, info: r, url: `${epPath(ep.id)}/section-audio?which=${which}&v=${encodeURIComponent(r.made)}` });
+          sectionDraft.play = true;
+        } catch (err) {
+          toastError(err);
+        }
+        sectionDraft.busy = null;
+        draw();
+      };
+      const busy = sectionDraft.busy;
+      add(box, h("div", { class: "row" },
+        h("b", { class: "small" }, "Hear it with the music:"),
+        h("button", { class: "btn btn-small", disabled: !!busy, onclick: make("opening") }, busy === "opening" ? "Mixing\u2026" : "The opening"),
+        h("button", { class: "btn btn-small", disabled: !!busy, onclick: make("ending") }, busy === "ending" ? "Mixing\u2026" : "The ending")));
+      if (ep.sign_off_after != null) {
+        const after = h("input", {
+          type: "text", inputmode: "decimal", "aria-label": "Seconds after the talk ends",
+          value: sectionDraft.after ?? String(ep.sign_off_after), oninput: (e) => { sectionDraft.after = e.target.value; },
+        });
+        add(box, h("form", {
+          class: "dead-air",
+          onsubmit: async (e) => {
+            e.preventDefault();
+            const res = await ctx.act(() => api(`${epPath(ep.id)}/sign-off-timing`, { method: "POST", body: { after_talk: Number(after.value) } }), (r) => r.summary);
+            if (res) {
+              sectionDraft.after = null;
+              if (sectionDraft.which === "ending") make("ending")();
+            }
+          },
+        }, h("span", {}, "The sign-off starts"), after, h("span", {}, "seconds after the talk ends."),
+        h("button", { class: "btn btn-small", type: "submit" }, "Apply")));
+      }
+      if (sectionDraft.url && !busy) {
+        const info = sectionDraft.info || {};
+        const player = h("audio", { controls: true, preload: "auto", src: sectionDraft.url, class: "section-player" });
+        player.addEventListener("play", () => { if (!audio.paused) audio.pause(); });
+        if (sectionDraft.play) {
+          sectionDraft.play = false;
+          if (!audio.paused) audio.pause();
+          player.play().catch(() => {});
+        }
+        add(box, [player, h("p", { class: "small muted" }, sectionDraft.which === "ending"
+          ? `The ending: ${info.from_text}\u2013${info.to_text} of the finished file. The talk ends ${fmtDur(info.talk_ends_at || 0)} in; then the sign-off over the music.`
+          : `The opening: the first ${fmtDur(info.to - info.from || 0)} of the finished file. The talk starts ${fmtDur(info.talk_starts_at || 0)} in.`)]);
+      }
+    };
+    draw();
+    return box;
   }
 
   async function switchSound(toOriginal) {
@@ -371,18 +433,17 @@ export function mountReview(container, initialEp, ctx) {
       if (!audio.paused) {
         const r = el.getBoundingClientRect();
         const inView = r.top >= 80 && r.bottom <= window.innerHeight - 40;
-        if (!followWords && inView) setFollow(true); // you scrolled back to where it's playing
         if (followWords && !inView) {
           autoScrollUntil = performance.now() + 1500;
           el.scrollIntoView({ block: "center", behavior: "smooth" });
         }
+        backBtn.hidden = followWords || inView;
       }
     }
   }
 
-  // The page follows the word being read, until you scroll away yourself (to the waveform, say).
-  // Then it stays put and offers a button back; clicking a word or the waveform, or pressing
-  // play, follows again.
+  // The page never moves by itself (Nick, Oct 21). While it plays and the word being read is off screen, a
+  // button offers to go there; after clicking it the page follows the words until you scroll away yourself.
   const backBtn = h("button", {
     class: "btn btn-primary follow-back", hidden: true,
     onclick: () => {
@@ -397,7 +458,7 @@ export function mountReview(container, initialEp, ctx) {
   document.body.append(backBtn);
   function setFollow(on) {
     followWords = on;
-    backBtn.hidden = on || audio.paused;
+    if (on || audio.paused) backBtn.hidden = true;
   }
   function onUserScroll() {
     if (audio.paused || !followWords) return;
@@ -715,7 +776,6 @@ export function mountReview(container, initialEp, ctx) {
   }
 
   function seek(t, play = false) {
-    setFollow(true);
     audio.currentTime = Math.max(0, Math.min(duration - 0.05, t));
     follow(audio.currentTime);
     if (!chapterTimeTouched) {
@@ -764,7 +824,6 @@ export function mountReview(container, initialEp, ctx) {
     playBtn.innerHTML = playing ? icons.pause : icons.play;
     playBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
   }
-  audio.addEventListener("play", () => setFollow(true));
   audio.addEventListener("pause", () => { backBtn.hidden = true; });
   audio.addEventListener("play", setPlayIcon);
   audio.addEventListener("pause", setPlayIcon);

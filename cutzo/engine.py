@@ -142,6 +142,14 @@ class ExtraBody(BaseModel):
     label: str | None = None
 
 
+class SectionBody(BaseModel):
+    which: str
+
+
+class SignOffBody(BaseModel):
+    after_talk: float
+
+
 class OrderBody(BaseModel):
     files: list[str] | str
 
@@ -264,6 +272,19 @@ def create_app(cutzo: Cutzo, *, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     @app.post("/api/episodes/{episode}/import")
     def import_media(episode: str, body: ImportBody, request: Request):
         return cutzo.import_media(episode, body.paths, source=source_of(request))
+
+    @app.post("/api/episodes/{episode}/section-preview")
+    def section_preview(episode: str, body: SectionBody, request: Request):
+        return cutzo.section_preview(episode, body.which, source=source_of(request))
+
+    @app.get("/api/episodes/{episode}/section-audio")
+    def section_audio(episode: str, which: str = "ending"):
+        return FileResponse(cutzo.section_audio(episode, which), media_type="audio/mp4",
+                            headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/episodes/{episode}/sign-off-timing")
+    def sign_off_timing(episode: str, body: SignOffBody, request: Request):
+        return cutzo.set_sign_off_timing(episode, body.after_talk, source=source_of(request))
 
     @app.post("/api/episodes/{episode}/recording-order")
     def recording_order(episode: str, body: OrderBody, request: Request):

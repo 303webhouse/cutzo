@@ -1276,6 +1276,11 @@ class Cutzo:
                            "full band comes in. Longer works (the music waits for it), but shorter is his style.")
         return out
 
+    def _sign_off_after(self, ep: dict[str, Any], show: dict[str, Any]) -> float | None:
+        recipe = recipes.RECIPES.get(show.get("recipe") or "") or {}
+        default = (recipe.get("outro") or {}).get("clips_after")
+        return None if default is None else float(ep.get("sign_off_after", default))
+
     def _cold_open_room(self, ep: dict[str, Any]) -> float | None:
         """How long a cold open fits before the show's music really starts (The Dig: ~18.6 s), or None."""
         recipe = recipes.RECIPES.get((showlib.get_show(ep["show"]) or {}).get("recipe") or "") or {}
@@ -1608,6 +1613,12 @@ class Cutzo:
             ep.setdefault("inserts", []).append(item["insert"])
             ep["inserts"].sort(key=lambda x: int(re.sub(r"\D", "", x["id"]) or 0))
             return True
+        if op == "sign_off_after":
+            if item.get("before") is None:
+                ep.pop("sign_off_after", None)
+            else:
+                ep["sign_off_after"] = item["before"]
+            return True
         if op == "media_order":
             for m in ep.get("media", []):
                 if m["id"] in item["before"]:
@@ -1697,29 +1708,9 @@ class Cutzo:
             ep = self._load(ep_id)
             show = showlib.get_show(ep["show"]) or {}
             ep_dir = self._ep_dir(ep_id)
-            voice_path = ep_dir / "voice.f32"
             ctx.step("Laying out the episode", 0.01, "Intro, breaks and ending from the show kit")
-            talk = self._talk_loudness(ep_id, check=ctx.check)
+            layout, talk, kit_file = self._render_layout(ep, show, check=ctx.check)
             kit_dir = self.guard.writable(self.library / "kit")
-
-            def kit_file(asset_id: str) -> Path:
-                if asset_id.startswith("insert:"):  # an extra: a file of Nick's
-                    return self._insert_sound(ep_id, asset_id[7:], check=ctx.check)
-                return kit.local_copy(asset_id, kit_dir=kit_dir, drive=self.drive, check=ctx.check)
-
-            def length_of(asset_id: str) -> float:
-                asset = kit.get_asset(asset_id) or {}
-                if asset.get("kind") == "video" and asset.get("seconds"):
-                    return float(asset["seconds"])  # its picture: don't decode a long video's sound for this
-                return audio.Pcm(kit_file(asset_id), channels=2).duration
-
-            def loudness_of(asset_id: str) -> float | None:
-                if asset_id.startswith("insert:"):
-                    return self._insert_loudness(ep_id, asset_id[7:], check=ctx.check)
-                return kit.loudness(asset_id, kit_dir=kit_dir, drive=self.drive, check=ctx.check)
-
-            layout = recipes.plan_episode(ep, show, voice_path=voice_path, talk_lufs=talk, kit_file=kit_file,
-                                          length_of=length_of, loudness_of=loudness_of)
             mix_path = self.guard.writable(ep_dir / "mix.f32")
             work_dir = self.guard.writable(ep_dir / "work-export")
             entries = []
@@ -1786,6 +1777,113 @@ class Cutzo:
                 summary += " The chapter list is saved next to it (no captions: the episode has no transcript)."
             return {"summary": summary, "exports": entries, "extras": extras}
         return work
+
+    def _render_layout(self, ep: dict[str, Any], show: dict[str, Any], *, check=None):
+        """The finished episode's layout with the real kit files (made ready on first use), for exports and
+        for listening to the opening or the ending. Returns (layout, talk loudness, kit_file)."""
+        ep_id = ep["id"]
+        talk = self._talk_loudness(ep_id, check=check)
+        kit_dir = self.guard.writable(self.library / "kit")
+
+        def kit_file(asset_id: str) -> Path:
+            if asset_id.startswith("insert:"):  # an extra: a file of Nick's
+                return self._insert_sound(ep_id, asset_id[7:], check=check)
+            return kit.local_copy(asset_id, kit_dir=kit_dir, drive=self.drive, check=check)
+
+        def length_of(asset_id: str) -> float:
+            asset = kit.get_asset(asset_id) or {}
+            if asset.get("kind") == "video" and asset.get("seconds"):
+                return float(asset["seconds"])  # its picture: don't decode a long video's sound for this
+            return audio.Pcm(kit_file(asset_id), channels=2).duration
+
+        def loudness_of(asset_id: str) -> float | None:
+            if asset_id.startswith("insert:"):
+                return self._insert_loudness(ep_id, asset_id[7:], check=check)
+            return kit.loudness(asset_id, kit_dir=kit_dir, drive=self.drive, check=check)
+
+        layout = recipes.plan_episode(ep, show, voice_path=self._ep_dir(ep_id) / "voice.f32", talk_lufs=talk,
+                                      kit_file=kit_file, length_of=length_of, loudness_of=loudness_of)
+        return layout, talk, kit_file
+
+    SECTIONS = {"opening": "the opening", "ending": "the ending"}
+
+    def section_preview(self, episode: str, which: str = "ending", source: str = "you") -> dict[str, Any]:
+        """Mix just the opening (cold open, theme, sound bites, the first words) or the ending (the last
+        words, the sign-off over the ending music) with the show's music, to listen to on Review while
+        picking and timing clips. Takes a few seconds; nothing is exported."""
+        key = str(which or "").strip().lower()
+        if key not in self.SECTIONS:
+            raise CutzoError("Choose the opening or the ending.")
+        ep = self._load(self.resolve_episode(episode))
+        self._require_built(ep)
+        if ep.get("sample"):
+            raise CutzoError("Sample episodes have no real sound to mix, so there's nothing to listen to.",
+                             hint="Try it on a real episode.")
+        show = showlib.get_show(ep["show"]) or {}
+        if not show.get("recipe"):
+            raise CutzoError(f"{show.get('name', 'This show')} has no intro or ending music to hear.")
+        ep_dir = self._ep_dir(ep["id"])
+        if not (ep_dir / "voice.f32").exists():
+            raise CutzoError("This episode's cleaned audio is missing.", hint="Build the episode again first.")
+        toolbox.require("ffmpeg")
+        layout, talk, _ = self._render_layout(ep, show)
+        if key == "opening":
+            a, b = 0.0, layout.talk_start + 20.0
+        else:
+            a, b = max(0.0, layout.talk_end - 30.0), layout.total
+        b = min(b, layout.total)
+        mix_path = self.guard.writable(ep_dir / f"section-{key}.f32")
+        dst = self.guard.writable(ep_dir / f"section-{key}.m4a")
+        try:
+            render.mix(layout, mix_path, window=(a, b))
+            # About as loud as the finished MP3: its target, for talk that plays in both channels.
+            gain = presets.get_preset("podcast-mp3")["spec"]["loudness"] - (talk + render.MONO_IN_STEREO_DB)
+            tmp = dst.with_name(dst.stem + ".part.m4a")
+            ffmpeg.run([*ffmpeg.raw_input_args(mix_path, 2), "-af", f"volume={gain:.2f}dB,alimiter=limit=0.89:level=false",
+                        "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-f", "mp4", str(tmp)],
+                       duration=b - a)
+            tmp.replace(dst)
+        finally:
+            mix_path.unlink(missing_ok=True)
+        self._log_read(source, "section_preview", f"listened to {self.SECTIONS[key]} of {_q(ep['title'], 40)}", ep["id"])
+        return {"which": key, "from": round(a, 3), "to": round(b, 3), "from_text": fmt_time(a), "to_text": fmt_time(b),
+                "talk_ends_at": round(layout.talk_end - a, 3) if key == "ending" else None,
+                "talk_starts_at": round(layout.talk_start - a, 3) if key == "opening" else None,
+                "made": now_iso()}
+
+    def section_audio(self, episode: str, which: str) -> Path:
+        ep_id = self.resolve_episode(episode)
+        key = str(which or "").strip().lower()
+        path = self._ep_dir(ep_id) / f"section-{key}.m4a"
+        if key not in self.SECTIONS or not path.exists():
+            raise NotFound("Nothing to play yet: make the preview first.")
+        return path
+
+    def set_sign_off_timing(self, episode: str, after_talk: Any, source: str = "you") -> dict[str, Any]:
+        """When the sign-off clips start, in seconds after the last words of the talk (The Dig: 3 s unless
+        set). Lets Nick land a clip on a moment in the ending music."""
+        try:
+            value = round(float(after_talk), 2)
+        except (TypeError, ValueError):
+            raise CutzoError("Give the time in seconds, like 3 or 8.5.") from None
+        if not 0.0 <= value <= 40.0:
+            raise CutzoError("Keep it between 0 and 40 seconds after the talk ends.")
+        with self._lock:
+            ep = self._load(self.resolve_episode(episode))
+            recipe = recipes.RECIPES.get((showlib.get_show(ep["show"]) or {}).get("recipe") or "") or {}
+            default = (recipe.get("outro") or {}).get("clips_after")
+            if default is None:
+                raise CutzoError("This show's ending has no adjustable sign-off timing yet.")
+            before = ep.get("sign_off_after")
+            if abs(value - default) < 1e-6:
+                ep.pop("sign_off_after", None)
+            else:
+                ep["sign_off_after"] = value
+            summary = f"The sign-off now starts {value:g} s after the talk ends"
+            self._push_history(ep, {"op": "sign_off_after", "before": before, "summary": summary})
+            self._save(ep)
+        self._log(source, "set_sign_off_timing", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
+        return {"summary": summary, "after_talk": value}
 
     def _write_captions(self, ep_id: str, layout: render.Plan, plan: list[dict[str, Any]]) -> dict[str, Any]:
         """Captions (.srt) and the YouTube chapter list (.txt) beside the exports, timed to the finished file
@@ -2533,6 +2631,7 @@ class Cutzo:
             "exports": ep.get("exports", []),
             "extras": ep.get("extras"),
             "teaser": ep.get("teaser"),
+            "sign_off_after": self._sign_off_after(ep, show),
             "marks": self._marks(ep),
             "has_transcript": bool(self._transcript(ep["id"]).get("words")),
             "has_original": (self._ep_dir(ep["id"]) / "original.m4a").exists(),
