@@ -142,6 +142,10 @@ class ExtraBody(BaseModel):
     label: str | None = None
 
 
+class OrderBody(BaseModel):
+    files: list[str] | str
+
+
 class TeaserBody(BaseModel):
     text: str = ""
     title: str | None = None
@@ -260,6 +264,10 @@ def create_app(cutzo: Cutzo, *, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     @app.post("/api/episodes/{episode}/import")
     def import_media(episode: str, body: ImportBody, request: Request):
         return cutzo.import_media(episode, body.paths, source=source_of(request))
+
+    @app.post("/api/episodes/{episode}/recording-order")
+    def recording_order(episode: str, body: OrderBody, request: Request):
+        return cutzo.set_recording_order(episode, body.files, source=source_of(request))
 
     @app.post("/api/episodes/{episode}/build")
     def build(episode: str, body: BuildBody, request: Request):

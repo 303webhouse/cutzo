@@ -449,6 +449,9 @@ p { margin: 0 0 10px; }
 #extras-side .btn { margin-top: 12px; }
 #title-graphic .field { margin: 10px 0 0; font-weight: 600; }
 #title-graphic .field input { padding: 8px 10px; font-weight: 400; }
+.mark-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.mark-list li { display: flex; gap: 8px; align-items: baseline; }
+.mark-list li.done span { color: var(--ink-soft); text-decoration: line-through; }
 #teaser .field input, #teaser .field textarea { font-weight: 400; }
 #title-graphic .btn { margin-top: 12px; }
 .copybox { width: 100%; min-height: 92px; font-size: var(--s-1); font-variant-numeric: tabular-nums; resize: vertical; }

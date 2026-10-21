@@ -30,6 +30,7 @@ Report = Callable[[float, str], None]
 Check = Callable[[], None]
 
 DEAD_AIR = {"longer_than": 1.0, "keep": 0.5}
+JOIN_GAP = 0.5  # seconds of quiet between combined recordings played one after another
 
 
 @dataclass
@@ -75,9 +76,11 @@ def choose_sources(media: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], d
         notes.append("No separate sound files, so Cutzo uses the sound of each person's video.")
         return tracks_video, mix, notes
     if mixes:
-        if len(mixes) > 1:
-            notes.append(f"Several combined recordings; using {mixes[0]['name']}.")
-        return [mixes[0]], None, notes
+        if len(mixes) > 1:  # the recording was stopped and started again: play them one after another
+            mixes = join_order(mixes)
+            notes.append(f"{len(mixes)} combined recordings, played one after another: "
+                         + ", then ".join(m["name"] for m in mixes) + ".")
+        return mixes, None, notes
     if others:
         return others, None, notes
     if camera:
@@ -85,6 +88,26 @@ def choose_sources(media: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], d
         return camera[:1], None, notes
     raise CutzoError("None of the imported files has sound to work with.",
                      hint="Import the audio recordings (WAV or MP3) or the videos with sound.")
+
+
+def is_mix(m: dict[str, Any]) -> bool:
+    return m.get("source") in ("streamyard-mix", "mix")
+
+
+def join_order(mixes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Combined recordings in playing order: the order Nick set ("part"), else the order they were added."""
+    return [m for _, m in sorted(enumerate(mixes), key=lambda km: (km[1].get("part") or 10**6, km[0]))]
+
+
+def join(sources: list[Source], gap: float = JOIN_GAP) -> list[str]:
+    """Combined recordings of one conversation (stopped and started again): each starts where the one
+    before ends, with a short pause between."""
+    at = 0.0
+    for k, s in enumerate(sources):
+        s.offset = round(at, 3)
+        s.method = f"Part {k + 1} of {len(sources)}, played after the one before" if k else f"Part 1 of {len(sources)}"
+        at += s.duration + gap
+    return []
 
 
 def decode_sources(chosen: list[dict[str, Any]], mix: dict[str, Any] | None, work: Path, *,

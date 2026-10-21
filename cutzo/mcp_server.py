@@ -57,6 +57,12 @@ How to work:
 - Extras (add_extra) are one-off sounds or videos for one episode, like the spooky haiku in Spooky
   Sode's first break: a file on Nick's PC or a show-kit item, at a time in the recording (the talk
   pauses there) or at a chapter (it plays in that chapter's break, before the page flip or stinger).
+- Claude marks: while recording, Nick says "Claude" where something should be cut (get_episode's
+  claude_marks lists each spot with the words around it). Read the transcript there, work out what he
+  meant (usually the flub, aside or false start just before, plus the "Claude" bit itself), cut it
+  with cut_words or cut_section, and tell him what you cut so he can listen.
+- Recordings stopped and started again: several combined recordings play one after another, in the
+  order they were added; set_recording_order changes it (then build again).
 - Teaser: when Nick asks for the episode teaser (the short description he posts on RSS.com, Spotify
   and Apple), read get_teaser_brief part by part (his style, his past teasers, the edited transcript),
   write it plus a suggested title in his voice, save both with save_teaser and show him the text.
@@ -226,8 +232,11 @@ def get_episode(
     out.update({
         "stages": ", ".join(f"{s['label']}: {s['status']}" for s in e["stages"]),
         "recordings": [{"name": m["name"], "kind": m.get("kind"), "person": m.get("person"),
-                        "source": m.get("source_label"), "sync": (m.get("sync") or {}).get("offset")}
+                        "source": m.get("source_label"), "sync": (m.get("sync") or {}).get("offset"),
+                        "plays": f"part {m['part']} of {m['parts']}" if m.get("part") else None}
                        for m in e["media"]],
+        "claude_marks": [{"at": k["time_text"], "said": f"...{k['before']} [{k['word']}] {k['after']}...",
+                          "already_cut": k["cut"] or None} for k in e.get("marks") or []] or None,
         "cameras": e.get("cameras") or None,
         "cuts": [{"id": x["id"], "from": x["start_text"], "to": x["end_text"], "why": x.get("reason"),
                   "words": x.get("text"), "by": x.get("by")} for x in shown],
@@ -299,6 +308,17 @@ def import_media(
     """Add recordings to an episode (read-only: originals are never changed). Returns a job id to poll."""
     res = engine.call("POST", _ep(episode) + "/import", {"paths": paths})
     return {"job": _job_brief(res["job"]), "files": res["files"], "skipped": res.get("skipped") or None}
+
+
+@server.tool(annotations=CHANGE, structured_output=False)
+def set_recording_order(
+    episode: Episode,
+    files: Annotated[list[str], Field(description="The combined recordings first to last, by file name (or part of it).")],
+) -> dict[str, Any]:
+    """When the recording was stopped and started again, the episode has several combined recordings that
+    play one after another. Set which plays first. Build the episode again afterwards to hear it."""
+    res = engine.call("POST", _ep(episode) + "/recording-order", {"files": files})
+    return {"done": res["summary"], "build_again": res.get("needs_rebuild") or None}
 
 
 @server.tool(annotations=CHANGE, structured_output=False)

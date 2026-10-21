@@ -524,7 +524,23 @@ export function mountReview(container, initialEp, ctx) {
         : "Paste into the episode notes. Times match the finished file, intro and breaks included."),
       yt,
       ep.chapter_warnings && ep.chapter_warnings.length ? h("ul", { class: "warn-list" }, ep.chapter_warnings.map((w) => h("li", {}, w))) : null);
-    add(side, [cutsSec, chapters, real ? extrasSection() : null, graphic, youtube]);
+    add(side, [marksSection(), cutsSec, chapters, real ? extrasSection() : null, graphic, youtube]);
+  }
+
+  // Spots where someone said "Claude" while recording: Nick's sign for "cut around here".
+  function marksSection() {
+    const marks = ep.marks || [];
+    if (!marks.length) return null;
+    const open = marks.filter((k) => !k.cut).length;
+    return h("section", { id: "marks-side" },
+      h("div", { class: "side-head" }, h("h3", {}, "You said \u201cClaude\u201d"),
+        h("span", {}, open ? `${open} to handle` : "all cut")),
+      h("p", { class: "small muted" }, open
+        ? "Ask Claude: \u201cHandle my Claude marks.\u201d It cuts what you meant and lists each cut, so you can listen."
+        : "Every mark sits inside a cut now. Listen to each one to check."),
+      h("ul", { class: "mark-list" }, marks.map((k) => h("li", { class: k.cut ? "done" : "" },
+        h("button", { class: "btn btn-quiet btn-small num", onclick: () => seek(Math.max(0, k.time - 8), true) }, k.time_text),
+        h("span", { class: "small" }, `\u2026${k.before.split(" ").slice(-10).join(" ")} `, h("b", {}, k.word), ` ${k.after.split(" ").slice(0, 10).join(" ")}\u2026`)))));
   }
 
   function extrasSection() {

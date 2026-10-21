@@ -369,3 +369,53 @@ def test_real_parakeet_cli_runs(tmp_path, monkeypatch):
     starts = [w["s"] for w in result["words"]]
     assert starts == sorted(starts) and all(0 <= x <= seconds for x in starts)
     assert not list(tmp_path.glob("parakeet-*"))  # the pieces were tidied away
+
+
+@needs_ffmpeg
+def test_combined_recordings_play_one_after_another(tmp_path, monkeypatch):
+    """The recording was stopped and started again: two combined recordings, joined end to end, in the
+    order they were added (or the order set), and Nick's spoken "Claude" marks are found."""
+    from cutzo.core import Cutzo, service
+
+    voice, _ = bursts_with_gaps(tmp_path)
+    files = []
+    for name, seconds in (("The_Dig_b-StreamYard.mp3", 3.0), ("The_Dig_a-StreamYard.mp3", 2.0)):
+        dst = tmp_path / name
+        subprocess.run([str(FFMPEG), "-hide_banner", "-loglevel", "error", "-y", "-f", "f32le", "-ar", str(RATE),
+                        "-ac", "1", "-i", str(voice), "-t", str(seconds), "-b:a", "192k", str(dst)], check=True)
+        files.append(dst)
+    app = Cutzo(tmp_path / "library", speed=0.0, drive=tmp_path / "drive")
+    try:
+        ep_id = app.create_episode(show="The Dig", title="Two parts")["episode"]["id"]
+        app.jobs.wait(app.import_media(ep_id, [str(f) for f in files])["job"]["id"], 60)
+        app.set_voice(ep_id, 0)
+        media = app.get_episode(ep_id)["media"]
+        assert [(m["name"], m["part"], m["parts"]) for m in media] == [
+            ("The_Dig_b-StreamYard.mp3", 1, 2), ("The_Dig_a-StreamYard.mp3", 2, 2)]
+        res = app.set_recording_order(ep_id, ["_a-"], source="claude")
+        assert res["order"] == ["The_Dig_a-StreamYard.mp3", "The_Dig_b-StreamYard.mp3"] and not res["needs_rebuild"]
+        with pytest.raises(CutzoError):
+            app.set_recording_order(ep_id, ["The_Dig"])  # matches both
+
+        monkeypatch.setattr(service.toolbox, "available", lambda *names: False)
+        assert app.jobs.wait(app.build_episode(ep_id)["job"]["id"], 120)["status"] == "done"
+        ep = app.get_episode(ep_id)
+        sync = {m["name"]: m["sync"] for m in ep["media"]}
+        first = sync["The_Dig_a-StreamYard.mp3"]
+        second = sync["The_Dig_b-StreamYard.mp3"]
+        assert first["offset"] == 0 and first["used"] and second["used"]
+        assert second["offset"] == pytest.approx(2.0 + 0.5, abs=0.06)  # the first part's length plus the pause
+        assert ep["duration"] == pytest.approx(2.0 + 0.5 + 3.0, abs=0.12)
+        assert any("played one after another" in n for n in ep["build_notes"])
+        assert app.set_recording_order(ep_id, ["_b-"])["needs_rebuild"]
+        app.undo(ep_id)
+        assert [m["part"] for m in app.get_episode(ep_id)["media"]] == [2, 1]
+
+        app._save_transcript(ep_id, {"words": [
+            {"w": w, "s": 0.4 * k, "e": 0.4 * k + 0.3} for k, w in enumerate("so um Claude, cut that please".split())]})
+        marks = app.get_episode(ep_id)["marks"]
+        assert len(marks) == 1 and marks[0]["word"] == "Claude," and marks[0]["before"] == "so um" and not marks[0]["cut"]
+        app.cut_section(ep_id, 0.3, 2.0)
+        assert app.get_episode(ep_id)["marks"][0]["cut"]
+    finally:
+        app.jobs.shutdown()

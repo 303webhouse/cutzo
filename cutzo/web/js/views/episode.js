@@ -246,7 +246,12 @@ export async function render(main, params, ctx) {
                   m.probe ? h("span", { class: "sub" }, describeProbe(m.probe)) : null,
                   m.problem ? h("span", { class: "sub check-fail" }, m.problem) : null),
                 h("td", {}, m.person || (m.source === "mix" || m.source === "streamyard-mix" ? "Everyone" : "\u2014")),
-                h("td", {}, `${m.source_label}${m.kind ? ` (${m.kind})` : ""}`),
+                h("td", {}, `${m.source_label}${m.kind ? ` (${m.kind})` : ""}`,
+                  m.part ? h("span", { class: "sub" }, `Plays ${m.part === 1 ? "first" : `${ordinal(m.part)}, right after part ${m.part - 1}`} (part ${m.part} of ${m.parts})`,
+                    m.part > 1 ? h("button", {
+                      class: "btn btn-quiet btn-small", style: { marginLeft: "6px" },
+                      onclick: () => act(() => api(epPath(ep.id) + "/recording-order", { method: "POST", body: { files: [m.id] } }), (r) => r.summary),
+                    }, "Play this first") : null) : null),
                 h("td", {}, m.sync && m.sync.offset != null ? [h("b", { class: "num" }, `${m.sync.offset >= 0 ? "+" : ""}${m.sync.offset.toFixed(3)} s`), h("span", { class: "sub" }, m.sync.method)]
                   : m.sync ? h("span", { class: "muted" }, m.sync.method) : h("span", { class: "muted" }, "After building")))))))
           : h("p", { class: "muted" }, "Add the raw files below. Cutzo reads them and never changes them."),
@@ -297,6 +302,10 @@ export async function render(main, params, ctx) {
         h("button", { class: "btn btn-quiet btn-small", onclick: removeEpisode }, "Remove it from Cutzo"),
         " Your recordings stay where they are."),
     ]);
+  }
+
+  function ordinal(n) {
+    return ["first", "second", "third", "fourth", "fifth"][n - 1] || `number ${n}`;
   }
 
   // ----------------------------------------------------------- kit

@@ -319,6 +319,46 @@ class Cutzo:
                   ep_id, details={"job": job["id"], "files": [f["name"] for f in files][:20]})
         return {"job": job, "files": [f["name"] for f in files], "skipped": skipped}
 
+    def set_recording_order(self, episode: str, files: Iterable[str] | str, source: str = "you") -> dict[str, Any]:
+        """The playing order of combined recordings that follow one another (the recording was stopped and
+        started again). `files` names them first to last: ids, file names or part of a name."""
+        if isinstance(files, str):
+            files = [f for f in re.split(r"[\r\n,;]+", files) if f.strip()]
+        wanted = [str(f).strip().strip('"') for f in files or [] if str(f).strip()]
+        with self._lock:
+            ep = self._load(self.resolve_episode(episode))
+            mixes = [m for m in ep.get("media", []) if buildlib.is_mix(m) and not m.get("problem")]
+            if len(mixes) < 2:
+                raise CutzoError("This episode has only one combined recording, so there's no order to set.")
+            chosen: list[dict[str, Any]] = []
+            for w in wanted:
+                low = w.lower()
+                hits = [m for m in mixes if m["id"] == w or m["name"].lower() == low or m.get("path", "").lower() == low]
+                hits = hits or [m for m in mixes if low in m["name"].lower()]
+                if len(hits) != 1:
+                    names = "; ".join(m["name"] for m in mixes)
+                    raise CutzoError(f"\u201c{w}\u201d {'matches several recordings' if hits else 'matches none of the recordings'}.",
+                                     hint=f"Name them by file name: {names}")
+                if hits[0] in chosen:
+                    raise CutzoError(f"{hits[0]['name']} is named twice.")
+                chosen.append(hits[0])
+            if not chosen:
+                raise CutzoError("Name the recordings in playing order, first one first.")
+            order = chosen + [m for m in buildlib.join_order(mixes) if m not in chosen]
+            before = {m["id"]: m.get("part") for m in mixes}
+            for k, m in enumerate(order):
+                m["part"] = k + 1
+            changed = any(before[m["id"]] != m["part"] for m in order)
+            summary = "Recordings play in this order: " + ", then ".join(m["name"] for m in order)
+            if changed:
+                if ep["stages"].get("sync") == "done":
+                    ep["needs_rebuild"] = True
+                    summary += " (build again to hear it)"
+                self._push_history(ep, {"op": "media_order", "before": before, "summary": summary})
+            self._save(ep)
+        self._log(source, "set_recording_order", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
+        return {"summary": summary, "order": [m["name"] for m in order], "needs_rebuild": bool(ep.get("needs_rebuild"))}
+
     def scan(self, folder: str) -> dict[str, Any]:
         """Preview what a folder contains (read-only), for the New episode form."""
         path = Path(str(folder).strip().strip('"'))
@@ -557,7 +597,10 @@ class Cutzo:
             chosen, mix, notes = buildlib.choose_sources([m for m in ep["media"] if not m.get("problem")])
             sources, mix_raw = buildlib.decode_sources(chosen, mix, work, check=ctx.check,
                                                        report=lambda p, label: report(0.9 * p, label))
-            notes += buildlib.line_up(sources, mix_raw, check=ctx.check)
+            if len(chosen) > 1 and all(buildlib.is_mix(m) for m in chosen):
+                notes += buildlib.join(sources)
+            else:
+                notes += buildlib.line_up(sources, mix_raw, check=ctx.check)
             with self._lock:
                 ep = self._load(ep_id)
                 used = {s.media_id: s for s in sources}
@@ -1556,6 +1599,14 @@ class Cutzo:
             ep.setdefault("inserts", []).append(item["insert"])
             ep["inserts"].sort(key=lambda x: int(re.sub(r"\D", "", x["id"]) or 0))
             return True
+        if op == "media_order":
+            for m in ep.get("media", []):
+                if m["id"] in item["before"]:
+                    if item["before"][m["id"]] is None:
+                        m.pop("part", None)
+                    else:
+                        m["part"] = item["before"][m["id"]]
+            return True
         if op == "teaser":
             if item.get("before") is None:
                 ep.pop("teaser", None)
@@ -2372,6 +2423,39 @@ class Cutzo:
             "created": ep.get("created"),
         }
 
+    MARK_WORDS = {"claude", "claud", "clawed", "clod", "klaud", "claudes"}
+
+    def _marks(self, ep: dict[str, Any]) -> list[dict[str, Any]]:
+        """Spots where someone said "Claude" while recording: Nick's sign for "Claude, cut around here".
+        Each has its recording time, the words around it and whether it already falls inside a cut."""
+        words = self._transcript(ep["id"]).get("words", [])
+        cuts = self._cuts(ep)
+        out: list[dict[str, Any]] = []
+        for i, w in enumerate(words):
+            if re.sub(r"[^a-z]", "", str(w["w"]).lower()) not in self.MARK_WORDS:
+                continue
+            t = float(w["s"])
+            before = " ".join(x["w"] for x in words[max(0, i - 25):i])
+            after = " ".join(x["w"] for x in words[i + 1:i + 26])
+            out.append({"time": round(t, 3), "time_text": fmt_time(t), "word": w["w"],
+                        "before": before, "after": after,
+                        "cut": tx.is_word_cut(w, cuts)})
+        return out
+
+    def _media_view(self, ep: dict[str, Any]) -> list[dict[str, Any]]:
+        """The recordings, with "part"/"parts" when several combined recordings play one after another."""
+        media = [dict(m) for m in ep.get("media", [])]
+        mixes = [m for m in media if buildlib.is_mix(m) and not m.get("problem")]
+        tracks = [m for m in media if m.get("source") == "streamyard-track" and not m.get("problem")]
+        for m in media:
+            m.pop("part", None)
+        if len(mixes) > 1 and not tracks:
+            order =buildlib.join_order([n for n in ep["media"] if buildlib.is_mix(n) and not n.get("problem")])
+            place = {n["id"]: k + 1 for k, n in enumerate(order)}
+            for m in mixes:
+                m["part"], m["parts"] = place[m["id"]], len(order)
+        return media
+
     def _edit_view(self, e: dict[str, Any], ep: dict[str, Any]) -> dict[str, Any]:
         v = dict(e)
         v["start_text"] = fmt_time(e["start"], precise=True)
@@ -2424,7 +2508,7 @@ class Cutzo:
         edits = sorted(ep.get("edits", []), key=lambda e: (e["start"], e["id"]))
         view.update({
             "folder": ep.get("folder"),
-            "media": ep.get("media", []),
+            "media": self._media_view(ep),
             "cameras": ep.get("cameras", []),
             "voice": ep.get("voice"),
             "edits": [self._edit_view(e, ep) for e in edits],
@@ -2440,6 +2524,7 @@ class Cutzo:
             "exports": ep.get("exports", []),
             "extras": ep.get("extras"),
             "teaser": ep.get("teaser"),
+            "marks": self._marks(ep),
             "has_transcript": bool(self._transcript(ep["id"]).get("words")),
             "has_original": (self._ep_dir(ep["id"]) / "original.m4a").exists(),
             "audio_type": "audio/mp4" if (self._ep_dir(ep["id"]) / "preview.m4a").exists() else "audio/wav",
