@@ -49,7 +49,11 @@ THE_DIG: dict[str, Any] = {
     "intro": {
         "cold_open_at": 0.5,
         "cold_open_gain_db": 5.5,  # Premiere had 4.0
-        "cold_open_end": 19.15,  # where Nick's cold open ended; everything after moves with it
+        # Where Nick's cold open ended, just before the full band comes in (about 21 s into the theme). A shorter
+        # cold open leaves the music where it is; a longer one moves the theme, bites and talk later by as much,
+        # so the band still comes in after it.
+        "cold_open_end": 19.15,
+        "cold_open_room": 18.65,  # cold_open_end - cold_open_at: what fits before the band
         "theme": {"start": 0.0, "length": 64.531, "at": 0.2, "gain_db": -4.4, "fade_out": 12.8},
         "bites": [  # asset, start, end (in the asset), at (finished time), Premiere gain
             ("dig-intro-not-meant", 10.777, 15.382, 23.023, 8.6),
@@ -63,7 +67,9 @@ THE_DIG: dict[str, Any] = {
         "talk_at": 60.661,
     },
     "break": {
-        "theme_starts": [0.0, 83.45],  # alternate between two parts of the song
+        # A different part of the song for each break, in turn: Nick's two from Season Debrief Part 2, then
+        # one from 41 s (the end of the first full-band part, the breakdown at 62 s and the band coming back).
+        "theme_starts": [0.0, 83.45, 41.0],
         "lead_in": 15.0,  # seconds of theme fading in under the end of a segment
         "alone": 27.0,  # seconds of theme on its own after the talking stops
         "theme_gain_db": -5.3,
@@ -317,13 +323,13 @@ def plan_episode(ep: dict[str, Any], show: dict[str, Any], *, voice_path: Path, 
         shift = None  # nothing before the talk: start straight away
         talk_at = 0.0
     else:
-        shift = (cold_end if cold else intro["cold_open_at"]) - intro["cold_open_end"]
+        shift = max(0.0, (cold_end if cold else intro["cold_open_at"]) - intro["cold_open_end"])
         talk_at = intro["talk_at"] + shift
     if theme != "none" and shift is not None:
         t = intro["theme"]
-        length = min(t["length"] + shift, length_of(theme))
+        length = min(t["length"], length_of(theme))
         plan.pieces.append(render.Piece(src=kit_file(theme), channels=2, start=t["start"], end=t["start"] + length,
-                                        at=t["at"], gain_db=t["gain_db"] + kit_offset, fade_in=0.05,
+                                        at=t["at"] + shift, gain_db=t["gain_db"] + kit_offset, fade_in=0.05,
                                         fade_out=t["fade_out"], curve="exp", kind="music", label="Theme (intro)"))
     if montage != "none" and shift is not None:
         for asset, a, b, at, gain in intro["bites"]:

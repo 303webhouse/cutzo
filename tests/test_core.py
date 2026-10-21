@@ -292,3 +292,9 @@ def test_teaser_parts_split_evenly():
     tr = {"speakers": [{"id": "S1", "name": "Jeremy"}],
           "words": [{"w": w, "s": k, "e": k + 0.5, "sp": "S1"} for k, w in enumerate(["Um,", "the", "uh", "Nuggets."])]}
     assert teaser.lines(tr, []) == [("[0:00] Jeremy: the Nuggets.", 2)]
+
+
+def test_dig_cold_open_notes_when_it_runs_past_the_band(cutzo):
+    assert "note" not in cutzo.add_pick(DIG, "cold open", 1, 18)
+    long = cutzo.add_pick(DIG, "cold open", 20, 25)
+    assert "18.6 s" in long["note"]

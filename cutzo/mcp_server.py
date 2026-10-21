@@ -532,9 +532,15 @@ def add_highlight(
     kind: Annotated[str, Field(description="'cold open' (highlights that open the episode) or 'sign-off' (clips at the very end).")],
     start: Time, end: Time,
 ) -> dict[str, Any]:
-    """Pick a stretch of the recording for the cold open or the sign-off (The Dig layout). Order = order added."""
+    """Pick a stretch of the recording for the cold open or the sign-off (The Dig layout). Order = order added.
+    The Dig's cold open is Nick's funniest, most puzzling moment, under about 18.6 s so it ends before the full
+    band comes in (several short picks can make it up). The sign-off is his "cold out": a funny clip, usually
+    unrelated to the Nuggets, over the ending music after the talk; cut it from the talk so it isn't heard twice."""
     res = engine.call("POST", _ep(episode) + "/picks", {"kind": kind, "start": start, "end": end})
-    return {"done": res["summary"], "id": res["pick"]["id"], "total_now": res["total"]}
+    out = {"done": res["summary"], "id": res["pick"]["id"], "total_now": res["total"]}
+    if res.get("note"):
+        out["note"] = res["note"]
+    return out
 
 
 @server.tool(annotations=CHANGE, structured_output=False)

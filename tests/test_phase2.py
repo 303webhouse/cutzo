@@ -247,6 +247,34 @@ def test_dig_layout_matches_season_debrief_part_2():
     assert plan.duck_db == recipes.THE_DIG["duck_db"] > 0  # music dips under voices (Nick, Oct 14)
 
 
+def test_dig_music_stays_on_its_cue_and_breaks_use_different_parts():
+    from cutzo.core import shows
+
+    show = shows.get_show("the-dig")
+
+    def plan_for(cold):
+        ep = _ep(chapters=(0, 200, 400, 600), cold=cold)
+        return recipes.plan_episode(ep, show, voice_path=Path("v.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
+                                    kit_file=lambda a: Path(a), length_of=lambda a: 1e9)
+
+    def first(plan, label):
+        return [p for p in plan.pieces if p.label == label][0]
+
+    nick, short, long = plan_for(((500, 518.65),)), plan_for(((500, 510),)), plan_for(((500, 530),))
+    # A shorter cold open leaves the theme, the bites and the talk where Nick put them (the band at ~21 s)...
+    for label in ("Theme (intro)", "Sound bite"):
+        assert first(short, label).at == pytest.approx(first(nick, label).at)
+    assert short.talk_start == pytest.approx(nick.talk_start)
+    # ...and a longer one moves all of it later by as much, so the band still comes in after it.
+    for label in ("Theme (intro)", "Sound bite"):
+        assert first(long, label).at == pytest.approx(first(nick, label).at + 11.35, abs=0.05)
+    assert recipes.THE_DIG["intro"]["cold_open_room"] == pytest.approx(
+        recipes.THE_DIG["intro"]["cold_open_end"] - recipes.THE_DIG["intro"]["cold_open_at"])
+    # Three breaks, three different parts of the song.
+    starts = [p.start for p in nick.pieces if p.label == "Theme (break)"]
+    assert starts == recipes.THE_DIG["break"]["theme_starts"][:3] and len(set(starts)) == 3
+
+
 def test_dig_extras_play_between_the_theme_and_the_stinger():
     from cutzo.core import shows
 

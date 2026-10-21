@@ -1269,8 +1269,17 @@ class Cutzo:
             self._push_history(ep, {"op": "add_pick", "kind": key, "id": pick["id"], "summary": summary})
             self._save(ep)
         self._log(source, "add_pick", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
-        return {"pick": self._pick_view(pick, key), "summary": summary,
-                "total": fmt_duration(total)}
+        out = {"pick": self._pick_view(pick, key), "summary": summary, "total": fmt_duration(total)}
+        room = self._cold_open_room(ep)
+        if key == "cold_open" and room and total > room + 0.05:
+            out["note"] = (f"The cold open is now {total:.1f} s; Nick keeps it under {room:.1f} s so it ends before the "
+                           "full band comes in. Longer works (the music waits for it), but shorter is his style.")
+        return out
+
+    def _cold_open_room(self, ep: dict[str, Any]) -> float | None:
+        """How long a cold open fits before the show's music really starts (The Dig: ~18.6 s), or None."""
+        recipe = recipes.RECIPES.get((showlib.get_show(ep["show"]) or {}).get("recipe") or "") or {}
+        return (recipe.get("intro") or {}).get("cold_open_room")
 
     def remove_pick(self, episode: str, pick_id: str, source: str = "you") -> dict[str, Any]:
         with self._lock:

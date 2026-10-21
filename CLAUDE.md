@@ -139,6 +139,11 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
 - Claude marks (Oct 21): Nick says "Claude" while recording where something should go. `Cutzo._marks`
   finds them in the transcript (`view["marks"]`, connector `get_episode.claude_marks`, the "You said
   Claude" list on Review); Claude reads the context and makes the cuts.
+- The Dig's intro (Oct 21, Nick): the cold open should end before the full band comes in (~21 s into the
+  theme), so under `intro.cold_open_room` (18.65 s); `add_pick` adds a note when it's longer. A shorter cold
+  open leaves the music and bites on their cue; a longer one moves theme, bites and talk later by as much.
+  Breaks use a different part of the song each (`break.theme_starts`, three parts). The sign-off is his
+  "cold out": a funny clip over the ending music, cut from the talk so it isn't heard twice.
 - Episode folders hold `voice.f32` (cleaned talk, recording time), `original.f32`, the two
   previews, `transcript.json`, `waveform-*.json` caches and `inserts/` (extras' copies). Exports
   render `mix.f32` then delete it (video exports also use `work-export/`, deleted after).
