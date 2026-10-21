@@ -47,6 +47,8 @@ export function mountReview(container, initialEp, ctx) {
   let freq = null;
   let skipCuts = true;
   let nowIndex = -1;
+  let followWords = true; // the page follows the word being read (see setFollow)
+  let autoScrollUntil = 0;
   let lastDraw = 0;
   let drag = null;
   let chapterTimeTouched = false;
@@ -368,10 +370,41 @@ export function mountReview(container, initialEp, ctx) {
       el.classList.add("now");
       if (!audio.paused) {
         const r = el.getBoundingClientRect();
-        if (r.top < 80 || r.bottom > window.innerHeight - 40) el.scrollIntoView({ block: "center", behavior: "smooth" });
+        const inView = r.top >= 80 && r.bottom <= window.innerHeight - 40;
+        if (!followWords && inView) setFollow(true); // you scrolled back to where it's playing
+        if (followWords && !inView) {
+          autoScrollUntil = performance.now() + 1500;
+          el.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
       }
     }
   }
+
+  // The page follows the word being read, until you scroll away yourself (to the waveform, say).
+  // Then it stays put and offers a button back; clicking a word or the waveform, or pressing
+  // play, follows again.
+  const backBtn = h("button", {
+    class: "btn btn-primary follow-back", hidden: true,
+    onclick: () => {
+      setFollow(true);
+      const el = nowIndex >= 0 ? wordEls.get(nowIndex) : null;
+      if (el) {
+        autoScrollUntil = performance.now() + 1500;
+        el.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    },
+  }, "\u2193 Back to the words being read");
+  document.body.append(backBtn);
+  function setFollow(on) {
+    followWords = on;
+    backBtn.hidden = on || audio.paused;
+  }
+  function onUserScroll() {
+    if (audio.paused || !followWords) return;
+    if (performance.now() < autoScrollUntil) return; // Cutzo's own scrolling
+    setFollow(false);
+  }
+  function onScrollIntent() { autoScrollUntil = 0; }
 
   // ------------------------------------------------------------- side
   function drawSide() {
@@ -682,6 +715,7 @@ export function mountReview(container, initialEp, ctx) {
   }
 
   function seek(t, play = false) {
+    setFollow(true);
     audio.currentTime = Math.max(0, Math.min(duration - 0.05, t));
     follow(audio.currentTime);
     if (!chapterTimeTouched) {
@@ -730,6 +764,8 @@ export function mountReview(container, initialEp, ctx) {
     playBtn.innerHTML = playing ? icons.pause : icons.play;
     playBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
   }
+  audio.addEventListener("play", () => setFollow(true));
+  audio.addEventListener("pause", () => { backBtn.hidden = true; });
   audio.addEventListener("play", setPlayIcon);
   audio.addEventListener("pause", setPlayIcon);
   audio.addEventListener("ended", setPlayIcon);
@@ -1198,6 +1234,9 @@ export function mountReview(container, initialEp, ctx) {
   document.addEventListener("keydown", onKey);
   document.addEventListener("mousedown", onDocDown);
   window.addEventListener("resize", onResize);
+  window.addEventListener("scroll", onUserScroll, { passive: true });
+  window.addEventListener("wheel", onScrollIntent, { passive: true });
+  window.addEventListener("touchstart", onScrollIntent, { passive: true });
 
   // ---------------------------------------------------------------- init
   async function init() {
@@ -1269,6 +1308,10 @@ export function mountReview(container, initialEp, ctx) {
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("mousedown", onDocDown);
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("scroll", onUserScroll);
+      window.removeEventListener("wheel", onScrollIntent);
+      window.removeEventListener("touchstart", onScrollIntent);
+      backBtn.remove();
       window.removeEventListener("mousemove", onDragMove);
       window.removeEventListener("mouseup", onDragEnd);
     },
