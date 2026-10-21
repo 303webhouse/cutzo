@@ -30,6 +30,7 @@ from . import captions as captionslib
 from . import video as videolib
 from . import build as buildlib
 from . import shows as showlib
+from . import teaser as teaserlib
 from . import transcript as tx
 from .activity import ActivityLog
 from .errors import CutzoError, NeedsConfirmation, NotAllowed, NotFound
@@ -802,6 +803,106 @@ class Cutzo:
             out["words"] = len(part.get("words", []))
         return out
 
+    # ============================================================== teaser
+    def teaser_brief(self, episode: str, part: Any = 1, source: str = "you") -> dict[str, Any]:
+        """What Claude needs to write the episode teaser: Nick's style and past descriptions, who's on,
+        the chapters and the edited transcript (cuts and fillers left out), in parts of ~6,000 words."""
+        ep = self._load(self.resolve_episode(episode))
+        tr = self._transcript(ep["id"])
+        if not tr.get("words"):
+            raise CutzoError("This episode has no transcript yet, so there's nothing to write the teaser from.",
+                             hint="Build the episode (or transcribe it) first; it takes a few minutes.")
+        parts = teaserlib.split(teaserlib.lines(tr, self._cuts(ep)))
+        try:
+            n = int(part or 1)
+        except (TypeError, ValueError):
+            raise CutzoError("part must be a number, like 1 or 2.") from None
+        if not 1 <= n <= len(parts):
+            raise CutzoError(f"This transcript has {len(parts)} part{'s' if len(parts) != 1 else ''}; "
+                             f"ask for 1 to {len(parts)}.")
+        show = showlib.get_show(ep["show"]) or {}
+        self._log_read(source, "get_teaser_brief",
+                       f"read part {n} of {len(parts)} of {_q(ep['title'], 40)} to write its teaser", ep["id"])
+        out: dict[str, Any] = {
+            "episode": ep["id"],
+            "title": ep["title"],
+            "show": show.get("name"),
+            "part": n,
+            "parts": len(parts),
+        }
+        if n == 1:
+            style = teaserlib.style_for(ep["show"])
+            ordered = sorted(ep.get("chapters", []), key=lambda c: c["time"])
+            out.update({
+                "how": ("Read every part of the transcript first (call again with part=2, 3, ...), then write the "
+                        "teaser and a suggested title in Nick's style and save them with save_teaser. Show Nick the "
+                        "text; he can change it in Cutzo's Export tab."),
+                "final_length": fmt_duration(self._final_duration(ep) or 0),
+                "speakers": [s["name"] for s in tr.get("speakers", [])] or
+                            ["(one combined recording: names aren't known; tell them apart from the talk, or ask Nick)"],
+                "chapters": [{"title": c["title"], "at": fmt_time(c["time"])} for c in ordered],
+                "where_it_goes": style["where"],
+                "style": style["notes"],
+                "title_format": style["title_format"],
+                "past_teasers": style["examples"],
+                "current_teaser": ep.get("teaser"),
+                "sample": bool(ep.get("sample") or tr.get("sample")),
+            })
+        out["transcript"] = "\n".join(parts[n - 1])
+        if n < len(parts):
+            out["next"] = f"Call again with part={n + 1} for the rest of the transcript."
+        return out
+
+    def set_teaser(self, episode: str, text: Any = None, title: Any = None, source: str = "you") -> dict[str, Any]:
+        """Store the episode teaser (and a suggested title) and write `<title> - Teaser.txt` beside the
+        exports. Leave title out to keep it; text "" removes the teaser."""
+        body = teaserlib.clean(text)
+        if len(body) > teaserlib.MAX_TEASER_CHARS:
+            raise CutzoError(f"That teaser is {len(body):,} characters; keep it under "
+                             f"{teaserlib.MAX_TEASER_CHARS:,} (Nick's usually run 200 to 800).")
+        with self._lock:
+            ep = self._load(self.resolve_episode(episode))
+            before = ep.get("teaser")
+            if not body:
+                if not before:
+                    raise CutzoError("This episode has no teaser to remove.")
+                ep.pop("teaser", None)
+                summary = "Removed the episode teaser"
+            else:
+                if title is None:
+                    new_title = (before or {}).get("title") or ""
+                else:
+                    new_title = " ".join(str(title).split())
+                if len(new_title) > 200:
+                    raise CutzoError("Keep the suggested title under 200 characters.")
+                ep["teaser"] = {"text": body, "title": new_title, "by": source, "at": now_iso()}
+                words = len(body.split())
+                summary = f"{'Updated' if before else 'Wrote'} the episode teaser ({words} words)"
+            self._write_teaser_file(ep)
+            self._push_history(ep, {"op": "teaser", "before": before, "summary": summary})
+            self._save(ep)
+        self._log(source, "set_teaser", f"{summary} for {_q(ep['title'], 40)}", ep["id"])
+        return {"teaser": ep.get("teaser"), "summary": summary}
+
+    def _write_teaser_file(self, ep: dict[str, Any]) -> None:
+        """Keep `<Show>/<Title> - Teaser.txt` (in the exports folder) in step with the stored teaser.
+        Sample episodes have pretend exports, so no file for them either."""
+        teaser = ep.get("teaser")
+        if ep.get("sample"):
+            if teaser:
+                teaser.pop("file", None)
+            return
+        show = showlib.get_show(ep["show"]) or {}
+        path = self.guard.writable(self.library / "exports" / safe_filename(show.get("name", "Other"))
+                                   / f"{safe_filename(ep['title'])} - Teaser.txt")
+        if not teaser:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        head = f"{teaser['title']}\n\n" if teaser.get("title") else ""
+        path.write_text(head + teaser["text"] + "\n", encoding="utf-8")
+        teaser["file"] = str(path)
+
     def waveform(self, episode: str, buckets: int = 1200, start: float | None = None,
                  end: float | None = None) -> dict[str, Any]:
         """Loudness outline for drawing. Real episodes can ask for a stretch (start..end, seconds) to zoom in."""
@@ -1454,6 +1555,13 @@ class Cutzo:
         if op == "remove_insert":
             ep.setdefault("inserts", []).append(item["insert"])
             ep["inserts"].sort(key=lambda x: int(re.sub(r"\D", "", x["id"]) or 0))
+            return True
+        if op == "teaser":
+            if item.get("before") is None:
+                ep.pop("teaser", None)
+            else:
+                ep["teaser"] = item["before"]
+            self._write_teaser_file(ep)
             return True
         if op == "video_title":
             if item.get("before") is None:
@@ -2331,6 +2439,7 @@ class Cutzo:
             "video_title": titles.lines_for(ep) if show.get("recipe") == "the-new-heretics" else None,
             "exports": ep.get("exports", []),
             "extras": ep.get("extras"),
+            "teaser": ep.get("teaser"),
             "has_transcript": bool(self._transcript(ep["id"]).get("words")),
             "has_original": (self._ep_dir(ep["id"]) / "original.m4a").exists(),
             "audio_type": "audio/mp4" if (self._ep_dir(ep["id"]) / "preview.m4a").exists() else "audio/wav",

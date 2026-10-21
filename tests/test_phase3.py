@@ -305,6 +305,17 @@ def test_build_transcribes_and_words_cut_cleanly(real_dig, monkeypatch):
     assert sel["start"] < true[0][0] and true[0][1] < sel["end"] < true[1][0], (sel, true)
     assert sel["text"] == "Um,"
 
+    # The teaser brief reads the edited transcript without fillers; the teaser lands beside the exports.
+    brief = app.teaser_brief(ep_id, source="claude")
+    assert brief["transcript"].endswith("so the Nuggets won.") and "Um" not in brief["transcript"]
+    assert not brief["sample"] and brief["past_teasers"]
+    saved = app.set_teaser(ep_id, "Nick talks Nuggets.", title="Words | ft. Nobody", source="claude")["teaser"]
+    path = Path(saved["file"])
+    assert path.parent == app.library / "exports" / "The Dig" and path.name == "Words - Teaser.txt"
+    assert path.read_text(encoding="utf-8") == "Words | ft. Nobody\n\nNick talks Nuggets.\n"
+    app.undo(ep_id)
+    assert not path.exists() and app.get_episode(ep_id)["teaser"] is None
+
 
 def test_episodes_built_before_speech_to_text_can_be_transcribed(real_dig, monkeypatch):
     app, ep_id, true = real_dig

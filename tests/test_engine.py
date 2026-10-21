@@ -129,3 +129,13 @@ def test_broken_settings_file_is_reported(tmp_path, monkeypatch):
     bad.write_text('{"library_folder": "D:\\\\Podcasts", "port": 80}', encoding="utf-8")
     with pytest.raises(config.SettingsError):
         config.load_settings()
+
+
+def test_teaser_routes(client):
+    brief = client.get("/api/episodes/spooky/teaser-brief?part=1")
+    assert brief.status_code == 200 and brief.json()["parts"] == 1
+    assert client.get("/api/episodes/spooky/teaser-brief?part=3").status_code == 400
+    saved = client.post("/api/episodes/spooky/teaser", json={"text": "Ghosts.", "title": "Boo"}, headers=CLAUDE)
+    assert saved.status_code == 200 and saved.json()["teaser"]["by"] == "claude"
+    assert client.get("/api/episodes/spooky").json()["teaser"]["title"] == "Boo"
+    assert client.post("/api/episodes/spooky/teaser", json={"text": "x"}).status_code == 403  # no source header

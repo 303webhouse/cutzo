@@ -57,6 +57,9 @@ How to work:
 - Extras (add_extra) are one-off sounds or videos for one episode, like the spooky haiku in Spooky
   Sode's first break: a file on Nick's PC or a show-kit item, at a time in the recording (the talk
   pauses there) or at a chapter (it plays in that chapter's break, before the page flip or stinger).
+- Teaser: when Nick asks for the episode teaser (the short description he posts on RSS.com, Spotify
+  and Apple), read get_teaser_brief part by part (his style, his past teasers, the edited transcript),
+  write it plus a suggested title in his voice, save both with save_teaser and show him the text.
 - Long jobs (import_media, build_episode, transcribe_episode, export) return a job id at once; poll
   job_status. Building a 90-minute episode takes about 15 minutes, transcribing alone about 4.
 - Every change is logged as "Claude" and shows up live in Cutzo's window. undo_last_change
@@ -262,6 +265,8 @@ def get_episode(
         "extras": [{"id": x["id"], "what": x["label"], "kind": x["kind_label"], "where": x["where"],
                     "length": x["length_text"], "part_of_file": x.get("part"), "source": x["source"],
                     "level_change_db": x.get("gain_db") or None} for x in e.get("inserts") or []] or None,
+        "teaser": ({"title": e["teaser"].get("title") or None, "text": e["teaser"]["text"]}
+                   if e.get("teaser") else None),
         "build_notes": e.get("build_notes") or None,
         "last_change": e.get("last_change"),
         "note": e.get("note"),
@@ -338,6 +343,58 @@ def get_transcript(
             f"Recording {t['recording_length']}, finished {t['final_length']}."
             + (f" Showing {t['stretch']}." if t.get("stretch") else "") + f"\n{t['note']}\n\n")
     return head + t["text"]
+
+
+@server.tool(annotations=READ, structured_output=False)
+def get_teaser_brief(
+    episode: Episode,
+    part: Annotated[int, Field(description="Which part of the transcript, 1 first. Part 1 also has the style "
+                                           "notes and Nick's past teasers.")] = 1,
+) -> str:
+    """Everything needed to write the episode teaser (the short description Nick posts with the episode on
+    RSS.com, which goes on to Spotify and Apple): his style, his past teasers and titles, who's on, the
+    chapters, and the edited transcript (cut words and "um"s left out) in parts of about 6,000 words.
+    Read every part, then write the teaser and a title in his voice and save them with save_teaser."""
+    b = engine.call("GET", _ep(episode) + "/teaser-brief", query={"part": str(int(part or 1))})
+    out = [f"{b['title']} ({b['show']}): transcript part {b['part']} of {b['parts']}."]
+    if b["part"] == 1:
+        out.append(b["how"])
+        if b.get("sample"):
+            out.append("This is a sample episode with pretend text: fine for trying the tools, not for a real teaser.")
+        out.append(f"Finished length: {b['final_length']}. Speakers: {', '.join(b['speakers'])}.")
+        if b["chapters"]:
+            out.append("Chapters: " + "; ".join(f"{c['at']} {c['title']}" for c in b["chapters"]) + ".")
+        out.append(f"\nWhere it goes: {b['where_it_goes']}.\nStyle:\n" + "\n".join(f"- {n}" for n in b["style"]))
+        out.append(f"Title format: {b['title_format']}")
+        if b["past_teasers"]:
+            out.append("\nNick's past teasers, newest first:")
+            for x in b["past_teasers"]:
+                out.append(f"\nTITLE: {x['title']}\n{x['text']}")
+        if b.get("current_teaser"):
+            cur = b["current_teaser"]
+            out.append(f"\nThe teaser saved now (by {cur.get('by')}): TITLE: {cur.get('title') or '(none)'}\n{cur['text']}")
+    out.append("\nTRANSCRIPT (times are in the original recording):\n" + b["transcript"])
+    if b.get("next"):
+        out.append("\n" + b["next"])
+    return "\n".join(out)
+
+
+@server.tool(annotations=CHANGE, structured_output=False)
+def save_teaser(
+    episode: Episode,
+    text: Annotated[str, Field(description="The teaser, plain text; separate paragraphs with a blank line. "
+                                           "An empty text removes the teaser.")],
+    title: Annotated[str | None, Field(description="Suggested episode title, e.g. 'Jokic Shmokic | ft. Miroslav Ćuk "
+                                                   "and Jeremy Poley'. Leave out to keep the current one.")] = None,
+) -> dict[str, Any]:
+    """Save the episode teaser and suggested title. They show on Cutzo's Export tab with Copy buttons (Nick
+    can edit them there) and are written to '<episode> - Teaser.txt' next to the exported files.
+    undo_last_change brings back the previous version."""
+    res = engine.call("POST", _ep(episode) + "/teaser", {"text": text, "title": title})
+    out = {"done": res["summary"]}
+    if (res.get("teaser") or {}).get("file"):
+        out["file"] = res["teaser"]["file"]
+    return out
 
 
 @server.tool(annotations=CHANGE, structured_output=False)

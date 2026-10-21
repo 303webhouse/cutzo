@@ -26,7 +26,7 @@ export async function render(main, params, ctx) {
   let review = null;
   let destroyed = false;
   // Things you are in the middle of typing or choosing survive live refreshes.
-  const draft = { paths: "", picks: null, confirm: null, player: null };
+  const draft = { paths: "", picks: null, confirm: null, player: null, teaser: null };
 
   const view = {
     async refresh() {
@@ -330,7 +330,7 @@ export async function render(main, params, ctx) {
   function drawExport() {
     const presetsBox = h("div", {});
     const exportsBox = h("div", {});
-    add(body, [presetsBox, exportsBox]);
+    add(body, [presetsBox, teaserPanel(), exportsBox]);
     api("/api/presets").then((presets) => {
       if (!draft.picks) draft.picks = new Set(ep.outputs);
       const pick = draft.picks;
@@ -442,6 +442,83 @@ export async function render(main, params, ctx) {
           x.check.note ? h("p", { class: "small muted", style: { marginTop: "10px" } }, x.check.note) : null));
       }
     }
+  }
+
+  // ---------------------------------------------------------- teaser
+  // The short description Nick posts with the episode (RSS.com, so Spotify and Apple too). Claude writes
+  // it through the connector; here it can be read, changed and copied. What you type survives redraws.
+  async function copyText(text, what, fallback) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(`Copied ${what}.`, { kind: "ok" });
+    } catch {
+      if (fallback) fallback.select();
+      toast("Press Ctrl+C to copy.", {});
+    }
+  }
+
+  function teaserPanel() {
+    const saved = ep.teaser || null;
+    const ask = `Write the teaser for ${ep.title}.`;
+    const box = h("section", { class: "panel", id: "teaser" });
+    const head = h("div", { class: "side-head" }, h("h3", { style: { margin: 0 } }, "Episode teaser"));
+    add(box, [head, h("p", { class: "small muted", style: { margin: "6px 0 12px" } },
+      "The short description for RSS.com (it goes on to Spotify and Apple). Claude writes it in your style from the edited transcript, with a title.")]);
+    if (!ep.has_transcript && !saved) {
+      add(box, h("p", { class: "small muted", style: { margin: 0 } }, "Ready once the episode has a transcript (building it makes one)."));
+      return box;
+    }
+    if (!saved) {
+      add(box, h("div", { class: "next-step", style: { margin: 0 } },
+        h("p", {}, h("strong", {}, "Ask Claude"), `\u201c${ask}\u201d`),
+        h("div", { class: "row" },
+          h("button", { class: "btn btn-small", onclick: () => copyText(ask, "the request; paste it into Claude") }, "Copy request"))));
+      return box;
+    }
+    // Your changes in progress, or the saved teaser.
+    const d = draft.teaser && draft.teaser.id === ep.id ? draft.teaser : null;
+    const titleIn = h("input", { type: "text", id: "teaser-title", value: d ? d.title : (saved.title || ""), placeholder: "Episode title | ft. guests" });
+    const textIn = h("textarea", { id: "teaser-text", rows: 7, style: { minHeight: "150px" } });
+    textIn.value = d ? d.text : saved.text;
+    const status = h("p", { class: "small muted", style: { margin: "8px 0 0" } });
+    const saveBtn = h("button", { class: "btn btn-primary btn-small" }, "Save changes");
+    const resetBtn = h("button", { class: "btn btn-quiet btn-small" }, "Undo my changes");
+    const words = () => textIn.value.trim().split(/\s+/).filter(Boolean).length;
+    const dirty = () => titleIn.value !== (saved.title || "") || textIn.value !== saved.text;
+    const sync = () => {
+      const changed = dirty();
+      draft.teaser = changed ? { id: ep.id, title: titleIn.value, text: textIn.value, base: saved.at } : null;
+      saveBtn.disabled = !changed;
+      resetBtn.hidden = !changed;
+      const who = saved.by === "claude" ? "Claude" : saved.by === "you" ? "you" : "Cutzo";
+      const newer = d && d.base !== saved.at ? " A newer version was saved since you started changing it." : "";
+      status.textContent = `${words()} words. Saved by ${who} ${relTime(saved.at)}${saved.file ? ", also in the exports folder as a text file" : ""}.${newer}`;
+    };
+    titleIn.oninput = sync;
+    textIn.oninput = sync;
+    saveBtn.onclick = () => act(() => api(epPath(ep.id) + "/teaser", { method: "POST", body: { text: textIn.value, title: titleIn.value } }),
+      (r) => { draft.teaser = null; return r.summary; });
+    resetBtn.onclick = () => { draft.teaser = null; drawTab(); };
+    add(head, h("div", { class: "row" },
+      saved.file ? h("button", {
+        class: "btn btn-quiet btn-small",
+        onclick: () => api("/api/reveal", { method: "POST", body: { file: saved.file } })
+          .then((r) => toast(r.shown ? "Opened the folder in File Explorer." : (r.note || "Done."), {})).catch(toastError),
+      }, "Show in folder") : null));
+    add(box, [
+      h("label", { class: "field", for: "teaser-title", style: { margin: "0 0 12px" } }, "Title",
+        h("div", { class: "row" }, titleIn,
+          h("button", { class: "btn btn-small", type: "button", onclick: () => copyText(titleIn.value, "the title", titleIn) }, "Copy title"))),
+      h("label", { class: "field", for: "teaser-text", style: { margin: 0 } }, "Teaser", textIn),
+      h("div", { class: "row", style: { marginTop: "10px" } },
+        h("button", { class: "btn btn-small", type: "button", onclick: () => copyText(textIn.value, "the teaser", textIn) }, "Copy teaser"),
+        saveBtn, resetBtn),
+      status,
+      h("p", { class: "small muted", style: { margin: "6px 0 0" } },
+        "Want another take? Ask Claude, e.g. \u201cRewrite the teaser, funnier and shorter.\u201d"),
+    ]);
+    sync();
+    return box;
   }
 
   // A finished file, played right here: the engine streams it from Cutzo's exports folder. If the tab

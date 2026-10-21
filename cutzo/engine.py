@@ -142,6 +142,11 @@ class ExtraBody(BaseModel):
     label: str | None = None
 
 
+class TeaserBody(BaseModel):
+    text: str = ""
+    title: str | None = None
+
+
 class RevealBody(BaseModel):
     file: str
 
@@ -265,6 +270,14 @@ def create_app(cutzo: Cutzo, *, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                    start: Optional[str] = None, end: Optional[str] = None):
         return cutzo.get_transcript(episode, include_cut=include_cut, fmt=format, source=source_of(request),
                                     start=start, end=end)
+
+    @app.get("/api/episodes/{episode}/teaser-brief")
+    def teaser_brief(episode: str, request: Request, part: int = 1):
+        return cutzo.teaser_brief(episode, part=part, source=source_of(request))
+
+    @app.post("/api/episodes/{episode}/teaser")
+    def set_teaser(episode: str, body: TeaserBody, request: Request):
+        return cutzo.set_teaser(episode, body.text, body.title, source=source_of(request))
 
     @app.post("/api/episodes/{episode}/transcribe")
     def transcribe(episode: str, request: Request):

@@ -449,6 +449,7 @@ p { margin: 0 0 10px; }
 #extras-side .btn { margin-top: 12px; }
 #title-graphic .field { margin: 10px 0 0; font-weight: 600; }
 #title-graphic .field input { padding: 8px 10px; font-weight: 400; }
+#teaser .field input, #teaser .field textarea { font-weight: 400; }
 #title-graphic .btn { margin-top: 12px; }
 .copybox { width: 100%; min-height: 92px; font-size: var(--s-1); font-variant-numeric: tabular-nums; resize: vertical; }
 .dead-list { margin-top: 10px; }

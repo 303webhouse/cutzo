@@ -125,6 +125,13 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
     exported. The Export tab plays finished files ("Watch it here" / "Listen here") through
     `GET /api/episodes/{ep}/exports/{target}/file` (`Cutzo.export_file`: only files inside the
     library; Starlette's FileResponse answers range requests, so seeking a 10 GB file works).
+- Episode teaser (Oct 21; Nick's pick: Claude writes it, free, through the connector, nothing
+  automatic): the short description he posts on RSS.com. `core/teaser.py` holds his style notes and his
+  past Dig descriptions (from the RSS.com feed) and splits the edited transcript (cuts and fillers left
+  out) into ~6,000-word parts. `Cutzo.teaser_brief` / `set_teaser` (`ep["teaser"]`: text, title, by, at,
+  file; undoable), routes `GET /teaser-brief?part=`, `POST /teaser`, connector `get_teaser_brief` /
+  `save_teaser`. Real episodes also get `exports/<Show>/<Title> - Teaser.txt`. Export tab: the Teaser
+  panel (copy request / edit, copy title and text).
 - Episode folders hold `voice.f32` (cleaned talk, recording time), `original.f32`, the two
   previews, `transcript.json`, `waveform-*.json` caches and `inserts/` (extras' copies). Exports
   render `mix.f32` then delete it (video exports also use `work-export/`, deleted after).
