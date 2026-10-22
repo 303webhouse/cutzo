@@ -55,14 +55,17 @@ THE_DIG: dict[str, Any] = {
         "cold_open_end": 19.15,
         "cold_open_room": 18.65,  # cold_open_end - cold_open_at: what fits before the band
         "theme": {"start": 0.0, "length": 64.531, "at": 0.2, "gain_db": -4.4, "fade_out": 12.8},
-        "bites": [  # asset, start, end (in the asset), at (finished time), Premiere gain
-            ("dig-intro-not-meant", 10.777, 15.382, 23.023, 8.6),
-            ("dig-intro-doug-moe", 17.084, 18.685, 29.429, 9.0),
-            ("dig-intro-doug-moe", 23.39, 25.225, 31.031, 9.4),
-            ("dig-intro-doug-moe", 27.094, 29.062, 32.866, 9.9),
+        # asset, start, end (in the asset), at (finished time), gain. Premiere had 8.6, 9.0, 9.4, 9.9, 9.0, 8.2 and 0.0;
+        # Nick found Jokic's "I wouldn't draft me either", Doug Moe's "let those stiffs run and chase ya" and the
+        # "You're listening to The Dig" voice-over too quiet under the theme (Oct 21), so those are louder.
+        "bites": [
+            ("dig-intro-not-meant", 10.777, 15.382, 23.023, 8.6 + 6.0),
+            ("dig-intro-doug-moe", 17.084, 18.685, 29.429, 9.0 + 4.0),
+            ("dig-intro-doug-moe", 23.39, 25.225, 31.031, 9.4 + 4.0),
+            ("dig-intro-doug-moe", 27.094, 29.062, 32.866, 9.9 + 4.0),
             ("dig-intro-take-that-l", 1.468, 3.103, 37.337, 9.0),
             ("dig-intro-take-that-l", 3.804, 5.906, 38.972, 8.2),
-            ("dig-intro-audio", 11.979, 16.016, 46.78, 0.0),
+            ("dig-intro-audio", 11.979, 16.016, 46.78, 0.0 + 5.0),
         ],
         "talk_at": 60.661,
     },
