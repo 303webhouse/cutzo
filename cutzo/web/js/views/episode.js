@@ -26,7 +26,7 @@ export async function render(main, params, ctx) {
   let review = null;
   let destroyed = false;
   // Things you are in the middle of typing or choosing survive live refreshes.
-  const draft = { paths: "", picks: null, confirm: null };
+  const draft = { paths: "", picks: null, confirm: null, player: null, teaser: null };
 
   const view = {
     async refresh() {
@@ -111,14 +111,16 @@ export async function render(main, params, ctx) {
               ? [h("span", {}, "Recording ", h("b", {}, fmtDur(ep.duration))),
                  h("span", {}, "After cuts ", h("b", {}, fmtDur(ep.final_duration))),
                  ep.finished_duration ? h("span", { title: "With the intro, breaks and ending" }, "Finished file ", h("b", {}, fmtDur(ep.finished_duration))) : null,
-                 h("span", {}, plural(ep.cut_count - (ep.pause_count || 0), "cut"),
-                   ep.pause_count ? `, ${plural(ep.pause_count, "pause")} shortened` : "", ", ", plural(ep.chapter_count, "chapter"))]
+                 h("span", {}, [
+                   ep.cut_count > (ep.pause_count || 0) || !ep.pause_count ? plural(ep.cut_count - (ep.pause_count || 0), "cut") : null,
+                   ep.pause_count ? `${plural(ep.pause_count, "pause")} shortened` : null,
+                   plural(ep.chapter_count, "chapter")].filter(Boolean).join(", "))]
               : h("span", {}, plural(ep.media_count, "recording"), ", not built yet"))),
         h("div", { class: "row" }, undo)),
       h("ol", { class: "stages", "aria-label": "Steps" },
         ep.stages.map((s) => h("li", { class: s.status },
           h("span", { class: "mark", svg: s.status === "done" ? icons.check : "" }),
-          h("span", {}, s.label, s.status === "later" ? h("span", { class: "later-note" }, " (Phase 3)") : null),
+          h("span", {}, s.label, s.status === "later" ? h("span", { class: "later-note" }, " (not yet)") : null),
           h("span", { class: "sr-only", style: { position: "absolute", left: "-9999px" } }, `: ${statusWord(s.status)}`)))),
       nextStep(next),
     ]);
@@ -140,11 +142,12 @@ export async function render(main, params, ctx) {
       "Add recordings": ["Add the raw recordings", "Paste the paths of the files, or the folder they're in."],
       "Build episode": ["Build the episode", ep.sample
         ? "Cutzo lines up the recordings, cleans the voices, writes the transcript and suggests cuts."
-        : "Cutzo lines up the recordings, cleans the voices and finds dead air. A long episode takes a few minutes."],
+        : "Cutzo lines up the recordings, cleans the voices, writes down every word and finds dead air. A 90-minute episode takes about 15 minutes."],
       "Build again": ["Build again", "New recordings or a new cleanup setting. Your own cuts, chapters and picks stay."],
       "Review cuts": ["Review the episode", ep.has_transcript
-        ? "Read the transcript, bring back anything you want to keep, then export."
-        : "Listen through, mark chapters and the cold open, check the dead-air cuts, then export."],
+        ? "Read the transcript and select words to cut them, mark chapters and the cold open, then export."
+        : ep.sample ? "Listen through, mark chapters and the cold open, check the dead-air cuts, then export."
+          : "No transcript yet. Transcribe it (about 2 minutes) to cut by words, or listen through and cut by time."],
       "See exports": ["Exported", "The finished files and their checks are on the Export tab."],
     }[next.label] || [next.label, ""];
     let button;
@@ -155,11 +158,20 @@ export async function render(main, params, ctx) {
     } else {
       button = h("a", { class: `btn ${next.quiet ? "" : "btn-primary"}`, href: `#/episode/${encodeURIComponent(ep.id)}/${next.tab}` }, next.label);
     }
-    return h("div", { class: "next-step" }, h("p", {}, h("strong", {}, copy[0]), copy[1]), button);
+    const extra = next.label === "Review cuts" && needsTranscript()
+      ? h("button", { class: "btn btn-primary", onclick: transcribe }, "Transcribe") : null;
+    if (extra) button.classList.remove("btn-primary");
+    return h("div", { class: "next-step" }, h("p", {}, h("strong", {}, copy[0]), copy[1]), h("div", { class: "row" }, extra, button));
   }
+
+  const needsTranscript = () => !ep.sample && built() && !ep.has_transcript;
 
   async function build() {
     await act(() => api(epPath(ep.id) + "/build", { method: "POST", body: {} }), "Building started. Progress shows on the left.");
+  }
+
+  async function transcribe() {
+    await act(() => api(epPath(ep.id) + "/transcribe", { method: "POST", body: {} }), "Transcribing started. Progress shows on the left.");
   }
 
   async function removeEpisode() {
@@ -234,7 +246,12 @@ export async function render(main, params, ctx) {
                   m.probe ? h("span", { class: "sub" }, describeProbe(m.probe)) : null,
                   m.problem ? h("span", { class: "sub check-fail" }, m.problem) : null),
                 h("td", {}, m.person || (m.source === "mix" || m.source === "streamyard-mix" ? "Everyone" : "\u2014")),
-                h("td", {}, `${m.source_label}${m.kind ? ` (${m.kind})` : ""}`),
+                h("td", {}, `${m.source_label}${m.kind ? ` (${m.kind})` : ""}`,
+                  m.part ? h("span", { class: "sub" }, `Plays ${m.part === 1 ? "first" : `${ordinal(m.part)}, right after part ${m.part - 1}`} (part ${m.part} of ${m.parts})`,
+                    m.part > 1 ? h("button", {
+                      class: "btn btn-quiet btn-small", style: { marginLeft: "6px" },
+                      onclick: () => act(() => api(epPath(ep.id) + "/recording-order", { method: "POST", body: { files: [m.id] } }), (r) => r.summary),
+                    }, "Play this first") : null) : null),
                 h("td", {}, m.sync && m.sync.offset != null ? [h("b", { class: "num" }, `${m.sync.offset >= 0 ? "+" : ""}${m.sync.offset.toFixed(3)} s`), h("span", { class: "sub" }, m.sync.method)]
                   : m.sync ? h("span", { class: "muted" }, m.sync.method) : h("span", { class: "muted" }, "After building")))))))
           : h("p", { class: "muted" }, "Add the raw files below. Cutzo reads them and never changes them."),
@@ -271,17 +288,24 @@ export async function render(main, params, ctx) {
             : h("ol", { class: "steps-list" },
                 h("li", {}, h("b", {}, "Sync: "), "lines up everyone's recordings (StreamYard's file names, then by sound)."),
                 h("li", {}, h("b", {}, "Podcast voice: "), "removes background noise, softens harsh S sounds, evens out voices."),
-                h("li", {}, h("b", {}, "Auto-edit: "), "finds long silences and suggests shortening them."),
-                h("li", {}, h("b", {}, "Transcribe: "), "arrives in Phase 3.")),
+                h("li", {}, h("b", {}, "Transcribe: "), "writes down every word with its time, “um”s included, on your graphics card."),
+                h("li", {}, h("b", {}, "Auto-edit: "), "finds long silences and suggests shortening them.")),
           built() ? h("p", { class: "small muted" }, "Building again replaces Cutzo's suggestions. Your own cuts and chapters, and Claude's, stay.") : null,
           ep.sample ? h("p", { class: "small muted" }, "Sample episode: these steps are pretend and use a short test clip.") : null,
           ep.voice_settings ? cleanupControl() : null,
-          h("button", { class: "btn btn-primary", disabled: !media.length || (ep.busy || []).length > 0, onclick: build }, built() ? "Build again" : "Build episode"))),
+          h("div", { class: "row" },
+            h("button", { class: "btn btn-primary", disabled: !media.length || (ep.busy || []).length > 0, onclick: build }, built() ? "Build again" : "Build episode"),
+            needsTranscript() ? h("button", { class: "btn", disabled: (ep.busy || []).length > 0, onclick: transcribe }, "Just transcribe") : null),
+          needsTranscript() ? h("p", { class: "small muted" }, "Built before speech to text was installed? Just transcribe: about 2 minutes, nothing else changes.") : null)),
       h("p", { class: "small muted", style: { marginTop: "8px" } },
         "Done with this episode in Cutzo? ",
         h("button", { class: "btn btn-quiet btn-small", onclick: removeEpisode }, "Remove it from Cutzo"),
         " Your recordings stay where they are."),
     ]);
+  }
+
+  function ordinal(n) {
+    return ["first", "second", "third", "fourth", "fifth"][n - 1] || `number ${n}`;
   }
 
   // ----------------------------------------------------------- kit
@@ -307,7 +331,7 @@ export async function render(main, params, ctx) {
     if (voiced) {
       body.append(h("section", { class: "panel" },
         h("h3", {}, "Voiced segment titles"),
-        h("p", { class: "muted" }, "Name a chapter like one of these and its voice clip plays at that chapter: The New Heretics, Define Your Terms, Why Should We Care, Building a Better Apostasy, Heretical Haiku, Logo Loses Us.")));
+        h("p", { class: "muted" }, "Name a chapter (after the first) like one of these and its voice clip plays there instead of the page flip: The New Heretics, Define Your Terms, Why Should We Care, Building a Better Apostasy, Heretical Haiku, Logo Loses Us.")));
     }
   }
 
@@ -315,27 +339,35 @@ export async function render(main, params, ctx) {
   function drawExport() {
     const presetsBox = h("div", {});
     const exportsBox = h("div", {});
-    add(body, [presetsBox, exportsBox]);
+    add(body, [presetsBox, teaserPanel(), exportsBox]);
     api("/api/presets").then((presets) => {
       if (!draft.picks) draft.picks = new Set(ep.outputs);
       const pick = draft.picks;
+      for (const p of presets) if (p.kind === "video" && !ep.sample && (!ep.has_picture || !p.spec)) pick.delete(p.id);
       const main = presets.filter((p) => !p.reserve);
       const reserve = presets.filter((p) => p.reserve);
       const final = ep.final_duration || 0;
+      // Why a target can't be made for this episode (real episodes only), or null.
+      const blocked = (p) => {
+        if (ep.sample || p.kind !== "video") return null;
+        if (!ep.has_picture) return `${ep.show_name} is audio only.`;
+        if (!p.spec) return "Cutzo makes video at 1080p for now.";
+        return null;
+      };
       const option = (p) => h("label", { class: "choice" },
         h("input", {
           type: "checkbox",
           value: p.id,
-          checked: pick.has(p.id) && !(p.kind === "video" && !ep.sample),
-          disabled: p.kind === "video" && !ep.sample,
+          checked: pick.has(p.id) && !blocked(p),
+          disabled: !!blocked(p),
           onchange: (e) => { if (e.target.checked) pick.add(p.id); else pick.delete(p.id); draft.confirm = null; },
         }),
         h("span", {},
           h("b", {}, p.label),
           h("span", { class: "small muted" }, p.summary),
           h("span", { class: "small", style: { display: "block", marginTop: "4px" } },
-            p.kind === "video" && !ep.sample ? "Video exports arrive in Phase 3."
-              : `This episode: ${fmtSize((p.gb_per_hour * (ep.finished_duration || final)) / 3600)}${ep.sample ? " (sample length)" : ""}`)));
+            blocked(p) || `This episode: ${fmtSize((p.gb_per_hour * (ep.finished_duration || final)) / 3600)}${ep.sample ? " (sample length)" : ""}`
+              + (p.kind === "video" && !ep.sample ? ". Video takes a while; the first time, Cutzo also makes 1080p copies of the show's videos." : ""))));
       const confirmBox = h("div", {});
       const showConfirm = () => {
         clear(confirmBox);
@@ -379,8 +411,24 @@ export async function render(main, params, ctx) {
     }).catch(toastError);
 
     const done = (ep.exports || []).slice().reverse();
+    const reveal = (file) => api("/api/reveal", { method: "POST", body: { file } })
+      .then((r) => toast(r.shown ? "Opened the folder in File Explorer." : (r.note || "Done."), {})).catch(toastError);
     if (done.length) {
       add(exportsBox, h("h2", { class: "section-title" }, "Finished"));
+      const extras = ep.extras || {};
+      if (extras.captions_file || extras.chapters_file) {
+        const line = (label, file, what) => h("p", { class: "small", style: { wordBreak: "break-all", margin: "8px 0 0" } },
+          h("b", {}, `${label}: `), file, h("span", { class: "muted" }, ` (${what})`),
+          h("button", { class: "btn btn-quiet btn-small", style: { marginLeft: "8px" }, onclick: () => reveal(file) }, "Show in folder"));
+        add(exportsBox, h("section", { class: "panel", id: "extras" },
+          h("h3", { style: { margin: 0 } }, "Captions and chapters"),
+          h("p", { class: "small muted", style: { margin: "6px 0 0" } },
+            "Made with the exports and timed to the finished file. On YouTube, upload the captions file (with timing) and paste the chapter list into the description."),
+          extras.captions_file
+            ? line("Captions", extras.captions_file, `${extras.captions} captions`)
+            : h("p", { class: "small muted", style: { margin: "8px 0 0" } }, "No captions: this episode has no transcript yet."),
+          extras.chapters_file ? line("Chapter list", extras.chapters_file, `${extras.chapters} chapters`) : null));
+      }
       for (const x of done) {
         add(exportsBox, h("section", { class: "panel" },
           h("div", { class: "row", style: { justifyContent: "space-between" } },
@@ -388,9 +436,9 @@ export async function render(main, params, ctx) {
             h("span", { class: x.check.passed ? "tag tag-ok" : "tag tag-cut" }, x.check.passed ? "All checks passed" : "Some checks failed")),
           h("p", { class: "small", style: { wordBreak: "break-all", margin: "8px 0 4px" } }, x.file,
             x.written ? h("button", {
-              class: "btn btn-quiet btn-small", style: { marginLeft: "8px" },
-              onclick: () => api("/api/reveal", { method: "POST", body: { file: x.file } }).then((r) => toast(r.shown ? "Opened the folder in File Explorer." : (r.note || "Done."), {})).catch(toastError),
+              class: "btn btn-quiet btn-small", style: { marginLeft: "8px" }, onclick: () => reveal(x.file),
             }, "Show in folder") : null),
+          x.written ? playerFor(x) : null,
           h("p", { class: "small muted" }, x.written
             ? `${relTime(x.at)}. ${x.final_length} long, ${fmtSize((x.bytes || 0) / 1e9)}.`
             : `${relTime(x.at)}. ${x.final_length} long, ${fmtSize(x.estimated_gb)}. Not written: sample episode.`),
@@ -403,6 +451,110 @@ export async function render(main, params, ctx) {
           x.check.note ? h("p", { class: "small muted", style: { marginTop: "10px" } }, x.check.note) : null));
       }
     }
+  }
+
+  // ---------------------------------------------------------- teaser
+  // The short description Nick posts with the episode (RSS.com, so Spotify and Apple too). Claude writes
+  // it through the connector; here it can be read, changed and copied. What you type survives redraws.
+  async function copyText(text, what, fallback) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(`Copied ${what}.`, { kind: "ok" });
+    } catch {
+      if (fallback) fallback.select();
+      toast("Press Ctrl+C to copy.", {});
+    }
+  }
+
+  function teaserPanel() {
+    const saved = ep.teaser || null;
+    const ask = `Write the teaser for ${ep.title}.`;
+    const box = h("section", { class: "panel", id: "teaser" });
+    const head = h("div", { class: "side-head" }, h("h3", { style: { margin: 0 } }, "Episode teaser"));
+    add(box, [head, h("p", { class: "small muted", style: { margin: "6px 0 12px" } },
+      "The short description for RSS.com (it goes on to Spotify and Apple). Claude writes it in your style from the edited transcript, with a title.")]);
+    if (!ep.has_transcript && !saved) {
+      add(box, h("p", { class: "small muted", style: { margin: 0 } }, "Ready once the episode has a transcript (building it makes one)."));
+      return box;
+    }
+    if (!saved) {
+      add(box, h("div", { class: "next-step", style: { margin: 0 } },
+        h("p", {}, h("strong", {}, "Ask Claude"), `\u201c${ask}\u201d`),
+        h("div", { class: "row" },
+          h("button", { class: "btn btn-small", onclick: () => copyText(ask, "the request; paste it into Claude") }, "Copy request"))));
+      return box;
+    }
+    // Your changes in progress, or the saved teaser.
+    const d = draft.teaser && draft.teaser.id === ep.id ? draft.teaser : null;
+    const titleIn = h("input", { type: "text", id: "teaser-title", value: d ? d.title : (saved.title || ""), placeholder: "Episode title | ft. guests" });
+    const textIn = h("textarea", { id: "teaser-text", rows: 7, style: { minHeight: "150px" } });
+    textIn.value = d ? d.text : saved.text;
+    const status = h("p", { class: "small muted", style: { margin: "8px 0 0" } });
+    const saveBtn = h("button", { class: "btn btn-primary btn-small" }, "Save changes");
+    const resetBtn = h("button", { class: "btn btn-quiet btn-small" }, "Undo my changes");
+    const words = () => textIn.value.trim().split(/\s+/).filter(Boolean).length;
+    const dirty = () => titleIn.value !== (saved.title || "") || textIn.value !== saved.text;
+    const sync = () => {
+      const changed = dirty();
+      draft.teaser = changed ? { id: ep.id, title: titleIn.value, text: textIn.value, base: saved.at } : null;
+      saveBtn.disabled = !changed;
+      resetBtn.hidden = !changed;
+      const who = saved.by === "claude" ? "Claude" : saved.by === "you" ? "you" : "Cutzo";
+      const newer = d && d.base !== saved.at ? " A newer version was saved since you started changing it." : "";
+      status.textContent = `${words()} words. Saved by ${who} ${relTime(saved.at)}${saved.file ? ", also in the exports folder as a text file" : ""}.${newer}`;
+    };
+    titleIn.oninput = sync;
+    textIn.oninput = sync;
+    saveBtn.onclick = () => act(() => api(epPath(ep.id) + "/teaser", { method: "POST", body: { text: textIn.value, title: titleIn.value } }),
+      (r) => { draft.teaser = null; return r.summary; });
+    resetBtn.onclick = () => { draft.teaser = null; drawTab(); };
+    add(head, h("div", { class: "row" },
+      saved.file ? h("button", {
+        class: "btn btn-quiet btn-small",
+        onclick: () => api("/api/reveal", { method: "POST", body: { file: saved.file } })
+          .then((r) => toast(r.shown ? "Opened the folder in File Explorer." : (r.note || "Done."), {})).catch(toastError),
+      }, "Show in folder") : null));
+    add(box, [
+      h("label", { class: "field", for: "teaser-title", style: { margin: "0 0 12px" } }, "Title",
+        h("div", { class: "row" }, titleIn,
+          h("button", { class: "btn btn-small", type: "button", onclick: () => copyText(titleIn.value, "the title", titleIn) }, "Copy title"))),
+      h("label", { class: "field", for: "teaser-text", style: { margin: 0 } }, "Teaser", textIn),
+      h("div", { class: "row", style: { marginTop: "10px" } },
+        h("button", { class: "btn btn-small", type: "button", onclick: () => copyText(textIn.value, "the teaser", textIn) }, "Copy teaser"),
+        saveBtn, resetBtn),
+      status,
+      h("p", { class: "small muted", style: { margin: "6px 0 0" } },
+        "Want another take? Ask Claude, e.g. \u201cRewrite the teaser, funnier and shorter.\u201d"),
+    ]);
+    sync();
+    return box;
+  }
+
+  // A finished file, played right here: the engine streams it from Cutzo's exports folder. If the tab
+  // redraws while it plays (a change made elsewhere), the player comes back at the same moment, paused.
+  function playerFor(x) {
+    if (!/\.(mp4|mp3|m4a|aac|wav)$/i.test(x.file)) return null;
+    const video = /\.mp4$/i.test(x.file);
+    const box = h("div", { class: "player-box" });
+    const open = (time, autoplay) => {
+      clear(box);
+      draft.player = { target: x.target, at: x.at, time };
+      const src = `${epPath(ep.id)}/exports/${encodeURIComponent(x.target)}/file?v=${encodeURIComponent(x.at)}`
+        + (time > 0 ? `#t=${time.toFixed(1)}` : "");
+      const el = h(video ? "video" : "audio", { controls: true, preload: "metadata", autoplay, src,
+        class: video ? "export-video" : "export-audio", "aria-label": `${x.label}, finished file` });
+      el.addEventListener("timeupdate", () => {
+        if (draft.player && draft.player.target === x.target) draft.player.time = el.currentTime;
+      });
+      box.append(el);
+    };
+    if (draft.player && draft.player.target === x.target && draft.player.at === x.at) open(draft.player.time, false);
+    else {
+      const start = h("button", { class: "btn btn-small", svg: icons.play, onclick: () => open(0, true) });
+      start.append(video ? "Watch it here" : "Listen here");
+      box.append(start);
+    }
+    return box;
   }
 
   function describeProbe(pr) {

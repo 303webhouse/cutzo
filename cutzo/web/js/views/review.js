@@ -1,13 +1,28 @@
 // Review: the deck (preview, player, waveform with spliced-out cuts) above the
 // transcript, which you mark up like a script: select words to cut them, click
-// struck words to bring them back. Real episodes have no transcript until Phase 3:
-// there the deck adds a zoomed waveform for precise selections, a switch to hear the
-// original sound, and the panel below holds the cold open, sign-off and dead-air settings.
+// struck words to bring them back. Real episodes also get a zoomed waveform for precise
+// selections, a switch to hear the original sound, and a panel above the transcript with
+// the cold open (or teaser), sign-off and dead-air settings (the panel alone until they're transcribed).
 
 import { api, epPath } from "../api.js";
 import { h, add, clear, icons, fmtTime, fmtDur, plural, toast, toastError, confirmDialog } from "../ui.js";
 
 const REASON = { "dead air": "Dead air", "filler word": "Filler word", words: "Words", manual: "Section", chosen: "Chosen" };
+// How each show opens and closes with stretches you pick from the talk (the API calls them cold_open and outro).
+const PICK_WORDS = {
+  "the-dig": {
+    open: "Cold open", openAbout: "Highlights that open the episode over the theme, before the sound bites.",
+    openEmpty: "None yet. Season Debrief Part 2 opened with three short highlights from late in the show.",
+    closeAbout: "Plays at the very end, after the conversation, over the theme.",
+    closeEmpty: "None yet. Optional: the theme ends the episode either way.",
+  },
+  "the-new-heretics": {
+    open: "Teaser", openAbout: "Highlights from the talk that open the episode with the spectrum, before the montage.",
+    openEmpty: "None yet. Spooky Sode's teaser was three short clips from late in the show, about 18 s in all.",
+    closeAbout: "Plays after the talk, over Full Flames and the quiet ending music.",
+    closeEmpty: "None yet. Optional: the ending music and flames close the episode either way.",
+  },
+};
 const BY = { auto: "Suggested by Cutzo", you: "You", claude: "Claude" };
 const CAM_COLORS = ["#8ec5ff", "#ffcf6e", "#9ee6b8", "#f6a7c8", "#c7b8ff", "#ffb48a"];
 const SHOW_LOOK = {
@@ -32,10 +47,18 @@ export function mountReview(container, initialEp, ctx) {
   let freq = null;
   let skipCuts = true;
   let nowIndex = -1;
+  const sectionDraft = { which: null, url: null, info: null, busy: null, after: null, play: false };
+  let followWords = false; // the page follows the word being read only after you ask (see setFollow)
+  let autoScrollUntil = 0;
   let lastDraw = 0;
   let drag = null;
   let chapterTimeTouched = false;
-  const chapterDraft = { time: null, title: "" };
+  const chapterDraft = { time: null, title: "", segment: false };
+  const titleDraft = { touched: false, label: "", title: "", guests: "" };
+  // Extras: one-off sounds or videos for this episode (the haiku in Spooky Sode).
+  let extraTimeTouched = false;
+  const extraDraft = { where: "time", time: null, file: "", kind: "", start: "", end: "", gain: "", label: "", more: false };
+  let kitItems = null; // the show kit's sound and video items, suggested in the file box
   let cutSignature = "";
   const look = SHOW_LOOK[ep.show] || SHOW_LOOK["the-dig"];
   const real = !ep.sample;
@@ -63,9 +86,11 @@ export function mountReview(container, initialEp, ctx) {
   const selbar = h("div", { class: "selbar" });
   const deck = h("section", { class: "deck", "aria-label": "Player" },
     h("div", {}, h("div", { class: "preview" }, preview),
-      h("p", { class: "preview-note" }, real
-        ? "Audio only: the picture moves with the sound while you listen."
-        : "Sample preview: the real video renders arrive in Phase 3.")),
+      h("p", { class: "preview-note" }, !real
+        ? "Sample preview: pretend data, nothing is rendered."
+        : ep.has_picture
+          ? "A quick sketch that moves with the sound. The real video is drawn when you export; watch it on the Export tab."
+          : "Audio only: the picture moves with the sound while you listen.")),
     h("div", {},
       h("div", { class: "transport" }, playBtn, clock, finalLen,
         ep.has_original ? h("label", { class: "switch", title: "Compare with the recording before cleanup" }, original, "Hear the original") : null,
@@ -73,7 +98,9 @@ export function mountReview(container, initialEp, ctx) {
       h("div", { class: "wave-area" }, flags, wave, zoomArea, camLabel, camLane),
       selbar),
     audio);
-  const script = h("section", { class: "script", "aria-label": "Transcript" }, h("p", { class: "muted" }, "Loading the transcript…"));
+  const panelBox = h("div", { class: "panel-box" });
+  const textBox = h("div", { class: "text-box" }, h("p", { class: "muted" }, "Loading the transcript…"));
+  const script = h("section", { class: "script", "aria-label": "Transcript" }, panelBox, textBox);
   const side = h("aside", { class: "side", "aria-label": "Cuts and chapters" });
   add(container, [deck, h("div", { class: "review" }, script, side)]);
   const floatBar = h("div", { class: "float-bar", role: "toolbar", "aria-label": "Selection", hidden: true });
@@ -157,11 +184,12 @@ export function mountReview(container, initialEp, ctx) {
 
   // -------------------------------------------------------- transcript
   function drawScript() {
-    if (!ep.has_transcript) return drawPanel();
+    if (real) drawPanel();
+    clear(textBox);
+    if (!ep.has_transcript) return;
     const nowCut = new Set(words.filter((w) => w && w.cut).map((w) => w.i));
-    clear(script);
     wordEls = new Map();
-    add(script, h("div", { class: "script-head" },
+    add(textBox, h("div", { class: "script-head", style: { marginTop: real ? "26px" : "0" } },
       h("h3", {}, "Transcript"),
       h("p", {}, "Select words to cut them. Click struck words to bring them back.")));
     for (const p of paragraphs) {
@@ -199,25 +227,24 @@ export function mountReview(container, initialEp, ctx) {
         }
         if (n < segments.length - 1) text.append(" ");
       });
-      script.append(h("div", { class: "para" },
+      textBox.append(h("div", { class: "para" },
         h("div", { class: "who-col" },
-          h("span", { class: "who-name" }, p.speaker),
+          h("span", { class: "who-name" }, p.speaker_id || ep.sample ? p.speaker : ""),
           h("button", { class: "para-time", title: "Play from here", onclick: () => seek(p.start, true) }, fmtTime(p.start))),
         text));
     }
-    script.append(h("p", { class: "script-tip" },
+    textBox.append(h("p", { class: "script-tip" },
       "Keys: Space plays or pauses, the arrow keys move a second (Shift for five), Ctrl+Z undoes the last change.",
-      ep.sample ? " This transcript is sample text." : ""));
+      ep.sample ? " This transcript is sample text." : " Cuts land in the quiet between words."));
     prevCut = nowCut;
     nowIndex = -1;
   }
 
-  // A real episode before Phase 3: no transcript, so this panel holds the cold open,
-  // the sign-off and how tight the dead-air trimming is.
+  // Real episodes: the cold open (The New Heretics' teaser), the sign-off and how tight the dead-air trimming is.
   function drawPanel() {
-    clear(script);
-    const recipe = ep.show === "the-dig";
-    if (recipe) {
+    clear(panelBox);
+    const words = PICK_WORDS[ep.show];
+    if (words) {
       const picks = ep.picks || { cold_open: [], outro: [] };
       const list = (key, title, about, empty) => {
         const items = picks[key] || [];
@@ -237,14 +264,14 @@ export function mountReview(container, initialEp, ctx) {
                 }, "Remove"))))
             : h("p", { class: "muted small" }, empty));
       };
-      add(script, [
+      add(panelBox, [
         h("div", { class: "script-head" }, h("h3", {}, "How the episode opens and closes"),
-          h("p", {}, "Drag across the waveform, then choose Add to cold open or Add to sign-off.")),
+          h("p", {}, `${ep.has_transcript ? "Select words in the transcript, or drag across the waveform" : "Drag across the waveform"}, `
+            + `then choose Add to ${words.open.toLowerCase()} or Add to sign-off.`)),
         h("div", { class: "two-col" },
-          list("cold_open", "Cold open", "Highlights that open the episode over the theme, before the sound bites.",
-            "None yet. Season Debrief Part 2 opened with three short highlights from late in the show."),
-          list("outro", "Sign-off", "Plays at the very end, after the conversation, over the theme.",
-            "None yet. Optional: the theme ends the episode either way.")),
+          list("cold_open", words.open, words.openAbout, words.openEmpty),
+          list("outro", "Sign-off", words.closeAbout, words.closeEmpty)),
+        hearWithMusic(),
       ]);
     }
     const da = ep.dead_air || { longer_than: 1, keep: 0.5 };
@@ -252,8 +279,8 @@ export function mountReview(container, initialEp, ctx) {
     const keep = h("input", { type: "text", inputmode: "decimal", "aria-label": "Shrink them to (seconds)", value: deadDraft.keep ?? String(da.keep), oninput: (e) => { deadDraft.keep = e.target.value; } });
     const deadCuts = ep.edits.filter((e) => e.type === "cut" && e.reason === "dead air");
     const saved = deadCuts.reduce((t, e) => t + e.length, 0);
-    add(script, [
-      h("div", { class: "script-head", style: { marginTop: recipe ? "18px" : "0" } }, h("h3", {}, "Dead air"),
+    add(panelBox, [
+      h("div", { class: "script-head", style: { marginTop: words ? "18px" : "0" } }, h("h3", {}, "Dead air"),
         h("p", {}, `${plural(deadCuts.length, "long silence")} shortened, ${fmtDur(saved)} out`)),
       h("form", {
         class: "dead-air",
@@ -266,11 +293,71 @@ export function mountReview(container, initialEp, ctx) {
         h("span", {}, "Shorten silences longer than"), longer, h("span", {}, "seconds to"), keep, h("span", {}, "seconds."),
         h("button", { class: "btn btn-small", type: "submit" }, "Apply")),
       h("p", { class: "small muted" }, "Smaller numbers make the conversation tighter. Cuts you brought back stay back."),
-      h("p", { class: "script-tip" },
-        "No transcript yet: transcripts arrive in Phase 3. Find moments with the waveform; the close-up under it shows ",
-        `${zoom.span} seconds around the playhead for precise selections. Keys: Space plays or pauses, the arrow keys move a second `,
-        "(Shift for five), Ctrl+Z undoes the last change."),
+      ep.has_transcript ? null : h("p", { class: "script-tip" },
+        "No transcript yet: use Transcribe at the top (about 2 minutes) to cut by words. Meanwhile, find moments with the ",
+        `waveform; the close-up under it shows ${zoom.span} seconds around the playhead for precise selections. Keys: Space `,
+        "plays or pauses, the arrow keys move a second (Shift for five), Ctrl+Z undoes the last change."),
     ]);
+  }
+
+  // The player above plays only the talk. These mix the opening or the ending with the show's music (a few
+  // seconds of work in the engine), so clips can be picked and timed against it.
+  function hearWithMusic() {
+    const box = h("div", { class: "hear-music" });
+    const draw = () => {
+      clear(box);
+      const make = (which) => async () => {
+        sectionDraft.busy = which;
+        draw();
+        try {
+          const r = await api(`${epPath(ep.id)}/section-preview`, { method: "POST", body: { which } });
+          Object.assign(sectionDraft, { which, info: r, url: `${epPath(ep.id)}/section-audio?which=${which}&v=${encodeURIComponent(r.made)}` });
+          sectionDraft.play = true;
+        } catch (err) {
+          toastError(err);
+        }
+        sectionDraft.busy = null;
+        draw();
+      };
+      const busy = sectionDraft.busy;
+      add(box, h("div", { class: "row" },
+        h("b", { class: "small" }, "Hear it with the music:"),
+        h("button", { class: "btn btn-small", disabled: !!busy, onclick: make("opening") }, busy === "opening" ? "Mixing\u2026" : "The opening"),
+        h("button", { class: "btn btn-small", disabled: !!busy, onclick: make("ending") }, busy === "ending" ? "Mixing\u2026" : "The ending")));
+      if (ep.sign_off_after != null) {
+        const after = h("input", {
+          type: "text", inputmode: "decimal", "aria-label": "Seconds after the talk ends",
+          value: sectionDraft.after ?? String(ep.sign_off_after), oninput: (e) => { sectionDraft.after = e.target.value; },
+        });
+        add(box, h("form", {
+          class: "dead-air",
+          onsubmit: async (e) => {
+            e.preventDefault();
+            const res = await ctx.act(() => api(`${epPath(ep.id)}/sign-off-timing`, { method: "POST", body: { after_talk: Number(after.value) } }), (r) => r.summary);
+            if (res) {
+              sectionDraft.after = null;
+              if (sectionDraft.which === "ending") make("ending")();
+            }
+          },
+        }, h("span", {}, "The sign-off starts"), after, h("span", {}, "seconds after the talk ends."),
+        h("button", { class: "btn btn-small", type: "submit" }, "Apply")));
+      }
+      if (sectionDraft.url && !busy) {
+        const info = sectionDraft.info || {};
+        const player = h("audio", { controls: true, preload: "auto", src: sectionDraft.url, class: "section-player" });
+        player.addEventListener("play", () => { if (!audio.paused) audio.pause(); });
+        if (sectionDraft.play) {
+          sectionDraft.play = false;
+          if (!audio.paused) audio.pause();
+          player.play().catch(() => {});
+        }
+        add(box, [player, h("p", { class: "small muted" }, sectionDraft.which === "ending"
+          ? `The ending: ${info.from_text}\u2013${info.to_text} of the finished file. The talk ends ${fmtDur(info.talk_ends_at || 0)} in; then the sign-off over the music.`
+          : `The opening: the first ${fmtDur(info.to - info.from || 0)} of the finished file. The talk starts ${fmtDur(info.talk_starts_at || 0)} in.`)]);
+      }
+    };
+    draw();
+    return box;
   }
 
   async function switchSound(toOriginal) {
@@ -345,10 +432,40 @@ export function mountReview(container, initialEp, ctx) {
       el.classList.add("now");
       if (!audio.paused) {
         const r = el.getBoundingClientRect();
-        if (r.top < 80 || r.bottom > window.innerHeight - 40) el.scrollIntoView({ block: "center", behavior: "smooth" });
+        const inView = r.top >= 80 && r.bottom <= window.innerHeight - 40;
+        if (followWords && !inView) {
+          autoScrollUntil = performance.now() + 1500;
+          el.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
+        backBtn.hidden = followWords || inView;
       }
     }
   }
+
+  // The page never moves by itself (Nick, Oct 21). While it plays and the word being read is off screen, a
+  // button offers to go there; after clicking it the page follows the words until you scroll away yourself.
+  const backBtn = h("button", {
+    class: "btn btn-primary follow-back", hidden: true,
+    onclick: () => {
+      setFollow(true);
+      const el = nowIndex >= 0 ? wordEls.get(nowIndex) : null;
+      if (el) {
+        autoScrollUntil = performance.now() + 1500;
+        el.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    },
+  }, "\u2193 Back to the words being read");
+  document.body.append(backBtn);
+  function setFollow(on) {
+    followWords = on;
+    if (on || audio.paused) backBtn.hidden = true;
+  }
+  function onUserScroll() {
+    if (audio.paused || !followWords) return;
+    if (performance.now() < autoScrollUntil) return; // Cutzo's own scrolling
+    setFollow(false);
+  }
+  function onScrollIntent() { autoScrollUntil = 0; }
 
   // ------------------------------------------------------------- side
   function drawSide() {
@@ -404,16 +521,29 @@ export function mountReview(container, initialEp, ctx) {
       value: chapterDraft.title,
       oninput: (e) => { chapterDraft.title = e.target.value; },
     });
+    const segments = ep.breaks_at === "segments";
+    const segBox = h("input", { type: "checkbox", checked: chapterDraft.segment, onchange: (e) => { chapterDraft.segment = e.target.checked; } });
     const chapters = h("section", { id: "chapters" },
       h("div", { class: "side-head" }, h("h3", {}, "Chapters"), h("span", {}, plural(ep.chapters.length, "chapter"))),
       ep.chapters.length
-        ? h("ul", { class: "items" }, ep.chapters.map((c) => h("li", { class: "item" },
+        ? h("ul", { class: "items" }, ep.chapters.map((c, k) => h("li", { class: "item" },
             h("div", { class: "item-main", onclick: () => seek(c.time, true), title: "Play from this chapter" },
               h("div", {}, h("span", { class: "item-time" }, c.time_text), " ", h("span", { class: "chapter-title" }, c.title)),
               h("div", { class: "item-text" }, `At ${c.output_text} in the finished file`),
               h("div", { class: "item-tags" },
+                c.segment && segments ? h("span", { class: "tag tag-ok" }, "Music break before") : null,
                 c.voiced_title ? h("span", { class: "tag tag-ok", title: `Plays ${c.voiced_title}` }, "Voiced title plays") : null,
-                h("span", { class: c.by === "claude" ? "tag tag-claude" : "tag" }, BY[c.by] || c.by))),
+                h("span", { class: c.by === "claude" ? "tag tag-claude" : "tag" }, BY[c.by] || c.by)),
+              segments && k > 0 ? h("label", {
+                class: "seg-toggle small",
+                title: "A new segment gets a music break before it; otherwise it's a new topic with a page flip.",
+                onclick: (e) => e.stopPropagation(),
+              }, h("input", {
+                type: "checkbox",
+                checked: !!c.segment,
+                onchange: (e) => ctx.act(() => api(`${epPath(ep.id)}/chapters/${encodeURIComponent(c.id)}/segment`,
+                  { method: "POST", body: { segment: e.target.checked } }), (r) => r.summary),
+              }), " New segment (music break before it)") : null),
             h("button", {
               class: "btn btn-quiet btn-small",
               "aria-label": `Remove chapter ${c.title}`,
@@ -425,18 +555,47 @@ export function mountReview(container, initialEp, ctx) {
         onsubmit: async (e) => {
           e.preventDefault();
           if (!titleInput.value.trim()) return titleInput.focus();
-          const res = await ctx.act(() => api(`${epPath(ep.id)}/chapters`, { method: "POST", body: { time: timeInput.value.trim(), title: titleInput.value.trim() } }),
+          const body = { time: timeInput.value.trim(), title: titleInput.value.trim() };
+          if (segments) body.segment = chapterDraft.segment;
+          const res = await ctx.act(() => api(`${epPath(ep.id)}/chapters`, { method: "POST", body }),
             (r) => r.voiced_title ? `${r.summary}. ${r.voiced_title} plays there.` : r.summary);
           if (res) {
             chapterTimeTouched = false;
             chapterDraft.time = null;
             chapterDraft.title = "";
+            chapterDraft.segment = false;
             const title = document.getElementById("chapter-title");
             if (title) title.value = "";
           }
         },
       }, timeInput, titleInput, h("button", { class: "btn", type: "submit" }, "Add")),
-      h("p", { class: "small muted", style: { marginTop: "6px" } }, "The time fills in from the playhead. Times are in the original recording."));
+      segments ? h("label", { class: "seg-toggle small" }, segBox, " New segment (music break before it)") : null,
+      h("p", { class: "small muted", style: { marginTop: "6px" } }, segments
+        ? "The time fills in from the playhead. Times are in the original recording. Each new chapter gets a page flip; a new segment gets a music break instead."
+        : "The time fills in from the playhead. Times are in the original recording."));
+
+    let graphic = null;
+    if (ep.video_title) {
+      if (!titleDraft.touched) Object.assign(titleDraft, ep.video_title);
+      const line = (key, label, hint) => h("label", { class: "field" }, label,
+        h("input", { type: "text", value: titleDraft[key], placeholder: hint,
+          oninput: (e) => { titleDraft[key] = e.target.value; titleDraft.touched = true; } }));
+      graphic = h("section", { id: "title-graphic" },
+        h("div", { class: "side-head" }, h("h3", {}, "Title graphic")),
+        h("p", { class: "small muted" }, "Shown under the show's name while you talk. The first two lines show in capitals."),
+        h("form", {
+          onsubmit: async (e) => {
+            e.preventDefault();
+            const res = await ctx.act(() => api(`${epPath(ep.id)}/video-title`, { method: "POST",
+              body: { label: titleDraft.label, title: titleDraft.title, guests: titleDraft.guests } }), (r) => r.summary);
+            if (res) titleDraft.touched = false;
+          },
+        },
+        line("label", "Top line", "Halloween Special:"),
+        line("title", "Title", "JW Ghost Stories"),
+        line("guests", "Guests", "ft. Two exJWs"),
+        h("button", { class: "btn", type: "submit" }, "Save title graphic")));
+    }
 
     const yt = h("textarea", { class: "copybox", readonly: true, "aria-label": "YouTube chapters" });
     yt.value = ep.youtube_chapters || "";
@@ -459,7 +618,108 @@ export function mountReview(container, initialEp, ctx) {
         : "Paste into the episode notes. Times match the finished file, intro and breaks included."),
       yt,
       ep.chapter_warnings && ep.chapter_warnings.length ? h("ul", { class: "warn-list" }, ep.chapter_warnings.map((w) => h("li", {}, w))) : null);
-    add(side, [cutsSec, chapters, youtube]);
+    add(side, [marksSection(), cutsSec, chapters, real ? extrasSection() : null, graphic, youtube]);
+  }
+
+  // Spots where someone said "Claude" while recording: Nick's sign for "cut around here".
+  function marksSection() {
+    const marks = ep.marks || [];
+    if (!marks.length) return null;
+    const open = marks.filter((k) => !k.cut).length;
+    return h("section", { id: "marks-side" },
+      h("div", { class: "side-head" }, h("h3", {}, "You said \u201cClaude\u201d"),
+        h("span", {}, open ? `${open} to handle` : "all cut")),
+      h("p", { class: "small muted" }, open
+        ? "Ask Claude: \u201cHandle my Claude marks.\u201d It cuts what you meant and lists each cut, so you can listen."
+        : "Every mark sits inside a cut now. Listen to each one to check."),
+      h("ul", { class: "mark-list" }, marks.map((k) => h("li", { class: k.cut ? "done" : "" },
+        h("button", { class: "btn btn-quiet btn-small num", onclick: () => seek(Math.max(0, k.time - 8), true) }, k.time_text),
+        h("span", { class: "small" }, `\u2026${k.before.split(" ").slice(-10).join(" ")} `, h("b", {}, k.word), ` ${k.after.split(" ").slice(0, 10).join(" ")}\u2026`)))));
+  }
+
+  function extrasSection() {
+    const items = ep.inserts || [];
+    if (kitItems === null) {
+      kitItems = [];
+      api(`/api/assets?show=${encodeURIComponent(ep.show)}`).then((r) => {
+        kitItems = r.assets.filter((a) => a.kind === "audio" || a.kind === "video");
+        const list = document.getElementById("extra-kit");
+        if (list) add(list, kitItems.map((a) => h("option", { value: a.name.replace(/\.[^.]+$/, "") })));
+      }).catch(() => {});
+    }
+    const segments = ep.breaks_at === "segments";
+    const timeBox = h("input", {
+      type: "text", id: "extra-time", "aria-label": "Time in the recording", hidden: extraDraft.where !== "time",
+      value: extraTimeTouched && extraDraft.time != null ? extraDraft.time : fmtTime(audio.currentTime || 0),
+      oninput: (e) => { extraTimeTouched = true; extraDraft.time = e.target.value; },
+    });
+    const whereRow = h("div", { class: `where${extraDraft.where === "time" ? "" : " no-time"}` });
+    const whereSel = h("select", {
+      "aria-label": "Where the extra goes",
+      onchange: (e) => {
+        extraDraft.where = e.target.value;
+        timeBox.hidden = e.target.value !== "time";
+        whereRow.classList.toggle("no-time", e.target.value !== "time");
+      },
+    },
+    h("option", { value: "time", selected: extraDraft.where === "time" }, "At a time in the talk"),
+    ep.chapters.slice(1).map((c) => h("option", { value: c.id, selected: extraDraft.where === c.id },
+      !segments || c.segment ? `In the break before \u201c${c.title}\u201d` : `Before the topic \u201c${c.title}\u201d`)));
+    add(whereRow, [whereSel, timeBox]);
+    const fileBox = h("input", {
+      type: "text", list: "extra-kit", "aria-label": "File or show-kit item", value: extraDraft.file,
+      placeholder: "G:\\My Drive\\...\\Spooky Haiku.wav, or Haiku Intro",
+      oninput: (e) => { extraDraft.file = e.target.value; },
+    });
+    const kindSel = h("select", { "aria-label": "What it is", onchange: (e) => { extraDraft.kind = e.target.value; } },
+      [["", "Cutzo guesses"], ["voice", "Spoken"], ["music", "Music"], ["video", "Video"]]
+        .map(([v, t]) => h("option", { value: v, selected: extraDraft.kind === v }, t)));
+    const small = (key, label, hint) => h("label", { class: "field" }, label,
+      h("input", { type: "text", value: extraDraft[key], placeholder: hint, oninput: (e) => { extraDraft[key] = e.target.value; } }));
+    const more = h("details", { open: extraDraft.more, ontoggle: (e) => { extraDraft.more = e.target.open; } },
+      h("summary", {}, "Part of the file, level, name"),
+      h("div", { class: "pair" }, small("start", "From", "0:00"), small("end", "To", "the end")),
+      h("div", { class: "pair" }, small("gain", "Level change (dB)", "0"), small("label", "Name", "the file's name")));
+    const submit = async (e) => {
+      e.preventDefault();
+      if (!extraDraft.file.trim()) return fileBox.focus();
+      const gain = extraDraft.gain.trim() ? Number(extraDraft.gain.trim().replace(",", ".")) : null;
+      if (Number.isNaN(gain)) return toast("The level change must be a number, like -3 or 2.", { kind: "error" });
+      const body = { file: extraDraft.file.trim(), kind: extraDraft.kind || null, gain_db: gain,
+                     start: extraDraft.start.trim() || null, end: extraDraft.end.trim() || null, label: extraDraft.label.trim() || null };
+      if (extraDraft.where === "time") body.time = timeBox.value.trim();
+      else body.chapter = extraDraft.where;
+      const res = await ctx.act(() => api(`${epPath(ep.id)}/extras`, { method: "POST", body }), (r) => r.summary);
+      if (res) {
+        Object.assign(extraDraft, { file: "", start: "", end: "", gain: "", label: "", time: null });
+        extraTimeTouched = false;
+      }
+    };
+    return h("section", { id: "extras-side" },
+      h("div", { class: "side-head" }, h("h3", {}, "Extras"), h("span", {}, items.length ? plural(items.length, "extra") : "")),
+      h("p", { class: "small muted" }, "One-off sounds or videos for this episode, like the haiku in Spooky Sode. "
+        + "The talk pauses for them; you hear them in the finished file."),
+      items.length ? h("ul", { class: "items" }, items.map((x) => h("li", { class: "item" },
+        h("div", { class: "item-main", onclick: () => seek(Math.max(0, x.at_time - 3), true), title: "Play the talk around this spot" },
+          h("div", {}, h("span", { class: "item-time" }, x.time_text), " ", h("span", { class: "chapter-title" }, x.label)),
+          h("div", { class: "item-text item-wrap" }, x.where),
+          h("div", { class: "item-text", title: x.source }, [
+            `${x.kind_label[0].toUpperCase()}${x.kind_label.slice(1)}`, x.length_text, x.part,
+            x.gain_db ? `${x.gain_db > 0 ? "+" : "−"}${Math.abs(x.gain_db)} dB` : null].filter(Boolean).join(" · ")),
+          h("div", { class: "item-tags" }, h("span", { class: x.by === "claude" ? "tag tag-claude" : "tag" }, BY[x.by] || x.by))),
+        h("button", {
+          class: "btn btn-quiet btn-small",
+          "aria-label": `Remove extra ${x.label}`,
+          onclick: () => ctx.act(() => api(`${epPath(ep.id)}/extras/${encodeURIComponent(x.id)}`, { method: "DELETE" }), (r) => r.summary),
+        }, "Remove")))) : null,
+      h("form", { onsubmit: submit },
+        h("div", { class: "field" }, h("span", {}, "Where"), whereRow),
+        h("label", { class: "field" }, "File or show-kit item",
+          h("span", { class: "hint" }, "In File Explorer, right-click the file and choose Copy as path."), fileBox),
+        h("datalist", { id: "extra-kit" }, (kitItems || []).map((a) => h("option", { value: a.name.replace(/\.[^.]+$/, "") }))),
+        h("label", { class: "field" }, "What it is", kindSel),
+        more,
+        h("button", { class: "btn", type: "submit" }, "Add extra")));
   }
 
   function prefillChapter(t) {
@@ -522,6 +782,10 @@ export function mountReview(container, initialEp, ctx) {
       const input = document.getElementById("chapter-time");
       if (input && document.activeElement !== input) input.value = fmtTime(t);
     }
+    if (!extraTimeTouched) {
+      const input = document.getElementById("extra-time");
+      if (input && document.activeElement !== input) input.value = fmtTime(t);
+    }
     if (play && audio.paused) togglePlay();
     draw(true);
   }
@@ -560,6 +824,7 @@ export function mountReview(container, initialEp, ctx) {
     playBtn.innerHTML = playing ? icons.pause : icons.play;
     playBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
   }
+  audio.addEventListener("pause", () => { backBtn.hidden = true; });
   audio.addEventListener("play", setPlayIcon);
   audio.addEventListener("pause", setPlayIcon);
   audio.addEventListener("ended", setPlayIcon);
@@ -579,11 +844,11 @@ export function mountReview(container, initialEp, ctx) {
       h("button", { class: "btn btn-cut btn-small", onclick: () => cutRange(a, b, selection.source === "text" ? "words" : "manual") }, "Cut section"),
       h("button", { class: "btn btn-small", onclick: () => prefillChapter(a) }, "Add chapter at start"),
     ];
-    if (real && ep.show === "the-dig") {
+    if (real && PICK_WORDS[ep.show]) {
       const pick = (kind) => ctx.act(() => api(`${epPath(ep.id)}/picks`, { method: "POST", body: { kind, start: a, end: b } }),
         (r) => `${r.summary}. Now ${r.total}.`).then((r) => { if (r) { selection = null; drawSelbar(); draw(true); } });
       parts.push(
-        h("button", { class: "btn btn-small", onclick: () => pick("cold_open") }, "Add to cold open"),
+        h("button", { class: "btn btn-small", onclick: () => pick("cold_open") }, `Add to ${PICK_WORDS[ep.show].open.toLowerCase()}`),
         h("button", { class: "btn btn-small", onclick: () => pick("outro") }, "Add to sign-off"));
     }
     if ((ep.cameras || []).length) {
@@ -800,7 +1065,7 @@ export function mountReview(container, initialEp, ctx) {
       }, sec < 60 ? `${sec} s` : `${sec / 60} min`)));
   }
   function drawScriptTipSpan() {
-    if (!ep.has_transcript) drawPanel();
+    if (real && !ep.has_transcript) drawPanel();
   }
   function follow(t, force = false) {
     if (!zoomOn()) return;
@@ -965,6 +1230,10 @@ export function mountReview(container, initialEp, ctx) {
       const input = document.getElementById("chapter-time");
       if (input && document.activeElement !== input) input.value = fmtTime(audio.currentTime);
     }
+    if (!extraTimeTouched && !audio.paused) {
+      const input = document.getElementById("extra-time");
+      if (input && document.activeElement !== input) input.value = fmtTime(audio.currentTime);
+    }
   }
 
   function draw(force = false) {
@@ -1024,6 +1293,9 @@ export function mountReview(container, initialEp, ctx) {
   document.addEventListener("keydown", onKey);
   document.addEventListener("mousedown", onDocDown);
   window.addEventListener("resize", onResize);
+  window.addEventListener("scroll", onUserScroll, { passive: true });
+  window.addEventListener("wheel", onScrollIntent, { passive: true });
+  window.addEventListener("touchstart", onScrollIntent, { passive: true });
 
   // ---------------------------------------------------------------- init
   async function init() {
@@ -1031,8 +1303,8 @@ export function mountReview(container, initialEp, ctx) {
     try {
       await Promise.all([loadTranscript(), loadWave()]);
     } catch (err) {
-      clear(script);
-      script.append(h("p", { class: "form-error" }, `Couldn't load the review: ${err.message}`));
+      clear(textBox);
+      textBox.append(h("p", { class: "form-error" }, `Couldn't load the review: ${err.message}`));
       return;
     }
     if (destroyed) return;
@@ -1078,6 +1350,8 @@ export function mountReview(container, initialEp, ctx) {
       if (cutsChanged || rebuilt) {
         cutSignature = signature;
         drawScript();
+      } else if (real) {
+        drawPanel(); // the teaser / cold open and sign-off lists (drafts in the dead-air boxes are kept)
       }
       drawSide();
       drawFlags();
@@ -1093,6 +1367,10 @@ export function mountReview(container, initialEp, ctx) {
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("mousedown", onDocDown);
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("scroll", onUserScroll);
+      window.removeEventListener("wheel", onScrollIntent);
+      window.removeEventListener("touchstart", onScrollIntent);
+      backBtn.remove();
       window.removeEventListener("mousemove", onDragMove);
       window.removeEventListener("mouseup", onDragEnd);
     },

@@ -20,7 +20,8 @@ from typing import Any, Callable
 
 import numpy as np
 
-from ..tools import ffmpeg
+from .. import tools
+from ..tools import ffmpeg, parakeet
 from . import audio
 from .errors import CutzoError
 from .voice import VoiceSettings, clean
@@ -29,6 +30,7 @@ Report = Callable[[float, str], None]
 Check = Callable[[], None]
 
 DEAD_AIR = {"longer_than": 1.0, "keep": 0.5}
+JOIN_GAP = 0.5  # seconds of quiet between combined recordings played one after another
 
 
 @dataclass
@@ -74,9 +76,11 @@ def choose_sources(media: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], d
         notes.append("No separate sound files, so Cutzo uses the sound of each person's video.")
         return tracks_video, mix, notes
     if mixes:
-        if len(mixes) > 1:
-            notes.append(f"Several combined recordings; using {mixes[0]['name']}.")
-        return [mixes[0]], None, notes
+        if len(mixes) > 1:  # the recording was stopped and started again: play them one after another
+            mixes = join_order(mixes)
+            notes.append(f"{len(mixes)} combined recordings, played one after another: "
+                         + ", then ".join(m["name"] for m in mixes) + ".")
+        return mixes, None, notes
     if others:
         return others, None, notes
     if camera:
@@ -84,6 +88,26 @@ def choose_sources(media: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], d
         return camera[:1], None, notes
     raise CutzoError("None of the imported files has sound to work with.",
                      hint="Import the audio recordings (WAV or MP3) or the videos with sound.")
+
+
+def is_mix(m: dict[str, Any]) -> bool:
+    return m.get("source") in ("streamyard-mix", "mix")
+
+
+def join_order(mixes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Combined recordings in playing order: the order Nick set ("part"), else the order they were added."""
+    return [m for _, m in sorted(enumerate(mixes), key=lambda km: (km[1].get("part") or 10**6, km[0]))]
+
+
+def join(sources: list[Source], gap: float = JOIN_GAP) -> list[str]:
+    """Combined recordings of one conversation (stopped and started again): each starts where the one
+    before ends, with a short pause between."""
+    at = 0.0
+    for k, s in enumerate(sources):
+        s.offset = round(at, 3)
+        s.method = f"Part {k + 1} of {len(sources)}, played after the one before" if k else f"Part 1 of {len(sources)}"
+        at += s.duration + gap
+    return []
 
 
 def decode_sources(chosen: list[dict[str, Any]], mix: dict[str, Any] | None, work: Path, *,
@@ -228,6 +252,94 @@ def _pairs(silences: list[tuple[float, float]], longer_than: float, keep: float,
             kept_silences.append((a, b))
             cuts.append(made[0])
     return kept_silences, cuts
+
+
+def transcribe(voice_path: Path, work: Path, sources: list[Source] | None = None, *, report: Report,
+               check: Check) -> dict[str, Any]:
+    """Speech to text over the cleaned conversation (recording time). With separate tracks for
+    several people, each word goes to whoever is loudest while it is said."""
+    work.mkdir(parents=True, exist_ok=True)
+    total = audio.Pcm(voice_path).duration
+    wav = work / "speech-16k.wav"
+    report(0.0, "Getting the audio ready")
+    ffmpeg.run([*ffmpeg.raw_input_args(voice_path, 1), "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-f", "wav",
+                str(wav)], duration=total, check=check, progress=lambda p: report(0.04 * p, "Getting the audio ready"))
+    try:
+        result = parakeet.transcribe(wav, work_dir=work, check=check,
+                                     progress=lambda p: report(0.04 + 0.92 * p, "Writing down every word"))
+    finally:
+        wav.unlink(missing_ok=True)
+    words = result["words"]
+    report(0.96, "Matching words to the sound")
+    env = audio.envelope(audio.Pcm(voice_path))
+    anchor_words(words, env, audio.suggest_threshold(env))
+    speakers: list[dict[str, str]] = []
+    people = [s for s in (sources or []) if s.person and _track(s) is not None]
+    if len(people) > 1:
+        report(0.97, "Working out who said what")
+        speakers = [{"id": f"S{k + 1}", "name": s.person or s.name} for k, s in enumerate(people)]
+        attribute_speakers(words, people, [sp["id"] for sp in speakers])
+    return {"engine": f"parakeet-cli (whisper.cpp {tools.WHISPER.version})", "model": f"parakeet-{tools.PARAKEET_MODEL.version}",
+            "speakers": speakers, "words": words}
+
+
+def anchor_words(words: list[dict[str, Any]], env: np.ndarray, quiet: float, reach: float = 0.6) -> None:
+    """Give each word a moment that is surely part of it ("c", seconds): the middle of its sound,
+    weighted by loudness; or, when its times fall wholly in a pause, the nearest sound within
+    `reach` seconds. Whether a word counts as cut goes by this moment (transcript.anchor), so a
+    word whose end speech to text stretched into the pause after it isn't struck through when
+    that pause is shortened. `env` is the voice's 10 ms loudness outline, `quiet` its silence level."""
+    hop, n = audio.HOP, len(env)
+    loud = env >= quiet
+    for w in words:
+        a = max(0, int(float(w["s"]) / hop))
+        b = min(n, max(a + 1, int(np.ceil(float(w["e"]) / hop))))
+        if a >= n:
+            continue
+        on = loud[a:b]
+        if on.any():
+            power = 10 ** (env[a:b][on].astype(np.float64) / 10)
+            t = (np.flatnonzero(on) + a + 0.5) * hop
+            w["c"] = round(float((t * power).sum() / power.sum()), 3)
+            continue
+        lo, hi = max(0, a - int(reach / hop)), min(n, b + int(reach / hop))
+        before, after = np.flatnonzero(loud[lo:a]), np.flatnonzero(loud[b:hi])
+        near = []
+        if len(before):
+            near.append((a - (lo + int(before[-1])), lo + int(before[-1])))
+        if len(after):
+            near.append((int(after[0]) + 1, b + int(after[0])))
+        if near:
+            w["c"] = round((min(near)[1] + 0.5) * hop, 3)
+
+
+def _track(s: Source) -> Path | None:
+    for path in (s.cleaned, s.raw):
+        if path is not None and Path(path).exists():
+            return Path(path)
+    return None
+
+
+def attribute_speakers(words: list[dict[str, Any]], people: list[Source], ids: list[str]) -> None:
+    """Mark each word with the speaker whose own track is loudest while it is said."""
+    hop = audio.HOP
+    outlines = []
+    for s in people:
+        env = audio.envelope(audio.Pcm(_track(s)))  # in the track's own time
+        outlines.append((env, s.offset))
+    for w in words:
+        best, best_level = None, -1e9
+        for (env, offset), sid in zip(outlines, ids):
+            a = int((float(w["s"]) - offset) / hop)
+            b = max(a + 1, int((float(w["e"]) - offset) / hop))
+            if b <= 0 or a >= len(env):
+                continue
+            seg = env[max(0, a):min(len(env), b)]
+            level = float(np.mean(10 ** (seg / 10.0))) if len(seg) else 0.0
+            if level > best_level:
+                best, best_level = sid, level
+        if best:
+            w["sp"] = best
 
 
 def tidy(ep_dir: Path) -> None:

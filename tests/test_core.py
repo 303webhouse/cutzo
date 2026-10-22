@@ -125,13 +125,13 @@ def test_export_and_confirm(cutzo):
     job = cutzo.jobs.wait(res["job"]["id"])
     assert job["status"] == "done", job
     view = cutzo.get_episode(SPOOKY)
-    assert {x["target"] for x in view["exports"]} == {"youtube-4k", "podcast-mp3"}
+    assert {x["target"] for x in view["exports"]} == {"youtube-1080p", "podcast-mp3"}  # "youtube" is 1080p now
     assert all(not x["written"] for x in view["exports"])
     for x in view["exports"]:
         assert cutzo.guard.is_writable(x["file"])
     with pytest.raises(NeedsConfirmation):
-        cutzo.export(SPOOKY, ["youtube-4k"])
-    again = cutzo.export(SPOOKY, ["youtube-4k"], confirm=True)
+        cutzo.export(SPOOKY, ["youtube-1080p"])
+    again = cutzo.export(SPOOKY, ["youtube-1080p"], confirm=True)
     assert cutzo.jobs.wait(again["job"]["id"])["status"] == "done"
     assert cutzo.check_export(episode=SPOOKY, target="youtube")["passed"] is True
     with pytest.raises(CutzoError):
@@ -242,3 +242,59 @@ def test_long_cut_confirmation_has_plain_message(cutzo):
     with pytest.raises(NeedsConfirmation) as big:
         cutzo.cut_section(SPOOKY, "0:00", "0:30")
     assert "confirm" not in big.value.message and "confirm=true" in big.value.hint
+
+
+def test_teaser_brief_and_saving(cutzo):
+    from cutzo.core import teaser
+
+    brief = cutzo.teaser_brief(DIG, source="claude")
+    assert brief["part"] == 1 and brief["parts"] == 1 and brief["sample"]
+    assert brief["past_teasers"] and all(x["title"] and x["text"] for x in brief["past_teasers"])
+    assert "Miroslav" in " ".join(brief["style"]) and "| ft." in brief["title_format"]
+    assert brief["transcript"].startswith("[0:") and "next" not in brief
+    with pytest.raises(CutzoError):
+        cutzo.teaser_brief(DIG, part=2)
+    before = brief["transcript"].lower().count("impossible")
+    cutzo.cut_words(DIG, "impossible", occurrence=1)
+    assert cutzo.teaser_brief(DIG)["transcript"].lower().count("impossible") == before - 1  # cut words left out
+    with pytest.raises(CutzoError):
+        cutzo.teaser_brief(EP1)  # not built: no transcript
+    with pytest.raises(CutzoError):
+        cutzo.set_teaser(DIG, "")  # nothing to remove yet
+
+    res = cutzo.set_teaser(DIG, "Miroslav, Jeremy, and Nick talk trades.\r\n\r\n\r\nGo Nuggets!  ",
+                           title="Impossible Trades | ft. Miroslav Ćuk and Jeremy Poley", source="claude")
+    assert res["summary"] == "Wrote the episode teaser (8 words)"
+    saved = cutzo.get_episode(DIG)["teaser"]
+    assert saved["text"] == "Miroslav, Jeremy, and Nick talk trades.\n\nGo Nuggets!" and saved["by"] == "claude"
+    assert "file" not in saved  # sample episode: no file
+    cutzo.set_teaser(DIG, "Shorter.", source="you")  # title kept
+    assert cutzo.get_episode(DIG)["teaser"]["title"].startswith("Impossible Trades")
+    assert cutzo.teaser_brief(DIG)["current_teaser"]["text"] == "Shorter."
+    cutzo.undo(DIG)
+    assert cutzo.get_episode(DIG)["teaser"]["text"].startswith("Miroslav")
+    with pytest.raises(CutzoError):
+        cutzo.set_teaser(DIG, "x" * (teaser.MAX_TEASER_CHARS + 1))
+    assert cutzo.set_teaser(DIG, "")["summary"] == "Removed the episode teaser"
+    assert cutzo.get_episode(DIG)["teaser"] is None
+    log = cutzo.activity_log(limit=20, include_reads=True)
+    assert any(e["action"] == "set_teaser" for e in log["entries"])
+
+
+def test_teaser_parts_split_evenly():
+    from cutzo.core import teaser
+
+    rows = [(f"line {k}", 1000) for k in range(13)]
+    parts = teaser.split(rows, 6000)
+    assert len(parts) == 3 and sum(len(p) for p in parts) == 13
+    assert max(len(p) for p in parts) - min(len(p) for p in parts) <= 1
+    assert teaser.split([("only", 10)], 6000) == [["only"]]
+    tr = {"speakers": [{"id": "S1", "name": "Jeremy"}],
+          "words": [{"w": w, "s": k, "e": k + 0.5, "sp": "S1"} for k, w in enumerate(["Um,", "the", "uh", "Nuggets."])]}
+    assert teaser.lines(tr, []) == [("[0:00] Jeremy: the Nuggets.", 2)]
+
+
+def test_dig_cold_open_notes_when_it_runs_past_the_band(cutzo):
+    assert "note" not in cutzo.add_pick(DIG, "cold open", 1, 18)
+    long = cutzo.add_pick(DIG, "cold open", 20, 25)
+    assert "18.6 s" in long["note"]
