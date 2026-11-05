@@ -88,6 +88,7 @@ class ChapterBody(BaseModel):
     time: TimeValue
     title: str
     segment: bool | None = None
+    music_hit: bool | None = None
 
 
 class SegmentBody(BaseModel):
@@ -140,6 +141,10 @@ class ExtraBody(BaseModel):
     end: TimeValue | None = None
     gain_db: float | None = None
     label: str | None = None
+
+
+class MusicHitBody(BaseModel):
+    on: bool = True
 
 
 class SectionBody(BaseModel):
@@ -365,7 +370,12 @@ def create_app(cutzo: Cutzo, *, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.post("/api/episodes/{episode}/chapters")
     def add_chapter(episode: str, body: ChapterBody, request: Request):
-        return cutzo.add_chapter(episode, body.time, body.title, source=source_of(request), segment=body.segment)
+        return cutzo.add_chapter(episode, body.time, body.title, source=source_of(request), segment=body.segment,
+                                 music_hit=body.music_hit)
+
+    @app.post("/api/episodes/{episode}/chapters/{chapter_id}/music-hit")
+    def set_music_hit(episode: str, chapter_id: str, body: MusicHitBody, request: Request):
+        return cutzo.set_music_hit(episode, chapter_id, body.on, source=source_of(request))
 
     @app.post("/api/episodes/{episode}/chapters/{chapter_id}/segment")
     def set_segment(episode: str, chapter_id: str, body: SegmentBody, request: Request):

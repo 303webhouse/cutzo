@@ -29,7 +29,10 @@ from .voice import VoiceSettings, clean
 Report = Callable[[float, str], None]
 Check = Callable[[], None]
 
-DEAD_AIR = {"longer_than": 1.0, "keep": 0.5}
+# Nick (Nov 5): pauses of 1-3 s are thinking time and stay, so only longer silences shrink, to a full second.
+# A 1-3 s pause right before a music break, or touching something cut, shrinks to `near_keep` (see
+# Cutzo._trim_pauses), so cut material and breaks don't leave holes.
+DEAD_AIR = {"longer_than": 3.0, "keep": 1.0, "near": 1.0, "near_keep": 0.5}
 JOIN_GAP = 0.5  # seconds of quiet between combined recordings played one after another
 
 
@@ -229,17 +232,22 @@ def build_voice(ep_dir: Path, sources: list[Source], settings: VoiceSettings, *,
     return voice_path, original_path, round(total, 3)
 
 
-def find_dead_air(voice_path: Path, *, longer_than: float, keep: float, threshold_db: float | None = None
-                  ) -> tuple[list[dict[str, Any]], dict[str, float]]:
-    """Long silences to shorten. Returns cut suggestions and the levels used."""
+def find_dead_air(voice_path: Path, *, longer_than: float, keep: float, threshold_db: float | None = None,
+                  near: float | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Long silences to shorten. Returns cut suggestions and the levels used; with `near`, the levels also
+    list every pause at least that long ("pauses"), to trim the ones next to cuts and breaks later."""
     pcm = audio.Pcm(voice_path)
     env = audio.envelope(pcm)
-    levels = {"speech_db": round(audio.speech_level(env), 1), "floor_db": round(audio.noise_floor(env), 1)}
+    levels: dict[str, Any] = {"speech_db": round(audio.speech_level(env), 1), "floor_db": round(audio.noise_floor(env), 1)}
     threshold = threshold_db if threshold_db is not None else audio.suggest_threshold(env)
     levels["threshold_db"] = threshold
-    silences = audio.find_silences(env, threshold, min_len=longer_than)
+    shortest = min(longer_than, near) if near else longer_than
+    silences = audio.find_silences(env, threshold, min_len=shortest)
+    if near:
+        levels["pauses"] = [[a, b] for a, b in silences]
+    long = [(a, b) for a, b in silences if b - a >= longer_than]
     cuts = []
-    for (a, b), (ca, cb) in zip(*_pairs(silences, longer_than, keep, pcm.duration)):
+    for (a, b), (ca, cb) in zip(*_pairs(long, longer_than, keep, pcm.duration)):
         cuts.append({"type": "cut", "start": ca, "end": cb, "reason": "dead air", "text": f"{b - a:.1f} s of silence"})
     return cuts, levels
 

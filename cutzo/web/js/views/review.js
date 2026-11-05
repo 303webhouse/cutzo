@@ -7,7 +7,9 @@
 import { api, epPath } from "../api.js";
 import { h, add, clear, icons, fmtTime, fmtDur, plural, toast, toastError, confirmDialog } from "../ui.js";
 
-const REASON = { "dead air": "Dead air", "filler word": "Filler word", words: "Words", manual: "Section", chosen: "Chosen" };
+// Cutzo's own trims of silence: long dead air, and pauses next to a cut or before a break.
+const isPause = (e) => e.by === "auto" && (e.reason === "dead air" || e.reason === "pause near cut");
+const REASON = { "dead air": "Dead air", "pause near cut": "Pause", "filler word": "Um (space kept)", words: "Words", manual: "Section", chosen: "Chosen" };
 // How each show opens and closes with stretches you pick from the talk (the API calls them cold_open and outro).
 const PICK_WORDS = {
   "the-dig": {
@@ -38,6 +40,7 @@ export function mountReview(container, initialEp, ctx) {
   let peaks = [];
   let duration = ep.duration || 1;
   let cuts = [];
+  let mutes = [];
   let selection = null;
   let prevCut = null;
   let raf = 0;
@@ -110,7 +113,7 @@ export function mountReview(container, initialEp, ctx) {
   function computeCuts() {
     // [start, end, pause?]: a range is a "pause" when only Cutzo's dead-air suggestions cover it.
     const ranges = ep.edits.filter((e) => e.type === "cut")
-      .map((e) => [e.start, e.end, e.reason === "dead air" && e.by === "auto"]).sort((a, b) => a[0] - b[0]);
+      .map((e) => [e.start, e.end, isPause(e)]).sort((a, b) => a[0] - b[0]);
     const merged = [];
     for (const [a, b, pause] of ranges) {
       const last = merged[merged.length - 1];
@@ -120,9 +123,12 @@ export function mountReview(container, initialEp, ctx) {
       } else merged.push([a, b, pause]);
     }
     cuts = merged;
+    mutes = ep.edits.filter((e) => e.type === "mute").map((e) => [e.start, e.end]);
   }
 
   const cutAt = (t) => cuts.find(([a, b]) => t >= a && t < b) || null;
+  // An "um" taken out with its space kept: the time stays, the sound goes.
+  const muteAt = (t) => mutes.find(([a, b]) => t >= a && t < b) || null;
 
   async function loadTranscript() {
     if (!ep.has_transcript) {
@@ -470,10 +476,12 @@ export function mountReview(container, initialEp, ctx) {
   // ------------------------------------------------------------- side
   function drawSide() {
     clear(side);
-    const cutEdits = ep.edits.filter((e) => e.type === "cut");
-    const dead = cutEdits.filter((e) => e.reason === "dead air" && e.by === "auto");
+    const cutEdits = ep.edits.filter((e) => e.type === "cut" || e.type === "mute");
+    const dead = cutEdits.filter(isPause);
+    const muted = cutEdits.filter((e) => e.type === "mute").length;
     const removed = Math.max(0, (ep.duration || 0) - (ep.final_duration || 0));
-    const counted = dead.length ? `${plural(cutEdits.length - dead.length, "cut")} + ${plural(dead.length, "pause")}` : plural(cutEdits.length, "cut");
+    const counted = [plural(cutEdits.length - dead.length - muted, "cut"), dead.length ? plural(dead.length, "pause") : null,
+      muted ? `${muted} um${muted === 1 ? "" : "s"}` : null].filter(Boolean).join(" + ");
     const cutsSec = h("section", {},
       h("div", { class: "side-head" }, h("h3", {}, "Cuts"), h("span", {}, `${counted}, ${fmtDur(removed)} out`)));
     const cutItem = (e) => h("li", { class: "item" },
@@ -532,6 +540,7 @@ export function mountReview(container, initialEp, ctx) {
               h("div", { class: "item-text" }, `At ${c.output_text} in the finished file`),
               h("div", { class: "item-tags" },
                 c.segment && segments ? h("span", { class: "tag tag-ok" }, "Music break before") : null,
+                c.music_hit && k > 0 ? h("span", { class: "tag tag-ok" }, "Music right away") : null,
                 c.voiced_title ? h("span", { class: "tag tag-ok", title: `Plays ${c.voiced_title}` }, "Voiced title plays") : null,
                 h("span", { class: c.by === "claude" ? "tag tag-claude" : "tag" }, BY[c.by] || c.by)),
               segments && k > 0 ? h("label", {
@@ -543,7 +552,17 @@ export function mountReview(container, initialEp, ctx) {
                 checked: !!c.segment,
                 onchange: (e) => ctx.act(() => api(`${epPath(ep.id)}/chapters/${encodeURIComponent(c.id)}/segment`,
                   { method: "POST", body: { segment: e.target.checked } }), (r) => r.summary),
-              }), " New segment (music break before it)") : null),
+              }), " New segment (music break before it)") : null,
+              ep.show === "the-dig" && k > 0 ? h("label", {
+                class: "seg-toggle small",
+                title: "The break music starts the moment the talk stops, as after a haiku's punchline, instead of fading in under the last words.",
+                onclick: (e) => e.stopPropagation(),
+              }, h("input", {
+                type: "checkbox",
+                checked: !!c.music_hit,
+                onchange: (e) => ctx.act(() => api(`${epPath(ep.id)}/chapters/${encodeURIComponent(c.id)}/music-hit`,
+                  { method: "POST", body: { on: e.target.checked } }), (r) => r.summary),
+              }), " Music right away (after a haiku)") : null),
             h("button", {
               class: "btn btn-quiet btn-small",
               "aria-label": `Remove chapter ${c.title}`,
@@ -622,18 +641,22 @@ export function mountReview(container, initialEp, ctx) {
   }
 
   // Spots where someone said "Claude" while recording: Nick's sign for "cut around here".
+  // Spots meant for Claude: "Claude" (usually "cut around here"), "cut" said on its own (a music break goes
+  // here) and a haiku (music right after its punchline).
+  const MARK_KIND = { claude: "Claude", cut: "Break", haiku: "Haiku" };
   function marksSection() {
     const marks = ep.marks || [];
     if (!marks.length) return null;
-    const open = marks.filter((k) => !k.cut).length;
+    const open = marks.filter((k) => !k.handled).length;
     return h("section", { id: "marks-side" },
-      h("div", { class: "side-head" }, h("h3", {}, "You said \u201cClaude\u201d"),
-        h("span", {}, open ? `${open} to handle` : "all cut")),
+      h("div", { class: "side-head" }, h("h3", {}, "Marks for Claude"),
+        h("span", {}, open ? `${open} to handle` : "all handled")),
       h("p", { class: "small muted" }, open
-        ? "Ask Claude: \u201cHandle my Claude marks.\u201d It cuts what you meant and lists each cut, so you can listen."
-        : "Every mark sits inside a cut now. Listen to each one to check."),
-      h("ul", { class: "mark-list" }, marks.map((k) => h("li", { class: k.cut ? "done" : "" },
+        ? "Ask Claude: \u201cHandle my marks.\u201d It makes the cuts and breaks you meant and lists each one, so you can listen. Most \u201cClaude\u201d mentions are just talk and stay."
+        : "Every mark is handled. Listen to each one to check."),
+      h("ul", { class: "mark-list" }, marks.map((k) => h("li", { class: k.handled ? "done" : "" },
         h("button", { class: "btn btn-quiet btn-small num", onclick: () => seek(Math.max(0, k.time - 8), true) }, k.time_text),
+        h("span", { class: "tag" }, MARK_KIND[k.kind] || "Claude"),
         h("span", { class: "small" }, `\u2026${k.before.split(" ").slice(-10).join(" ")} `, h("b", {}, k.word), ` ${k.after.split(" ").slice(0, 10).join(" ")}\u2026`)))));
   }
 
@@ -939,7 +962,7 @@ export function mountReview(container, initialEp, ctx) {
     const barW = Math.max(1, step * 0.62);
     for (let i = 0; i < bars.length; i++) {
       const t = a + ((i + 0.5) / n) * span;
-      const inCut = cutAt(t);
+      const inCut = cutAt(t) || muteAt(t);
       const amp = Math.max(1 * dpr, bars[i] * (H * 0.46));
       g.fillStyle = inCut ? "rgba(236, 238, 241, 0.16)" : t <= now ? "#ffffff" : "#9aa2ae";
       g.fillRect(i * step, mid - amp, barW, amp * 2);
@@ -1253,6 +1276,8 @@ export function mountReview(container, initialEp, ctx) {
       const c = cutAt(audio.currentTime);
       if (c) audio.currentTime = Math.min(c[1] + 0.001, duration);
     }
+    const silent = skipCuts && !!muteAt(audio.currentTime);
+    if (audio.muted !== silent) audio.muted = silent;
     if (!audio.paused) follow(audio.currentTime);
     draw();
   }

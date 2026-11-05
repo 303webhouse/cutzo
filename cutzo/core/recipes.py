@@ -79,6 +79,11 @@ THE_DIG: dict[str, Any] = {
         "fade_out": 3.0,
         "stinger_length": 1.1,
         "stinger_gain_db": 5.1,
+        # "Music right away" (a haiku's punchline, Nick Nov 5): the theme starts at full the moment the talk
+        # stops, from just before its last stab (20.63 s) and the full band (21.29 s), with no lead-in under
+        # the talk.
+        "hit_start": 20.58,
+        "hit_fade_in": 0.03,
     },
     "outro": {
         "lead_in": 18.0,
@@ -294,7 +299,7 @@ def plan_episode(ep: dict[str, Any], show: dict[str, Any], *, voice_path: Path, 
 
     if recipe is None:  # a plain episode: just the conversation (and any extras)
         gaps = {t: sum(x.length for x in xs) for t, xs in extras.items()}
-        pieces, to_finished, talk_end = render.conversation(voice_path, kept, 0.0, gaps)
+        pieces, to_finished, talk_end = render.conversation(voice_path, kept, 0.0, gaps, mutes=render.mute_ranges(ep.get("edits", [])))
         plan.pieces += pieces
         for t, xs in extras.items():
             _extra_pieces(plan, xs, to_finished(t) - gaps[t], kit_file, gain_of)
@@ -347,6 +352,7 @@ def plan_episode(ep: dict[str, Any], show: dict[str, Any], *, voice_path: Path, 
     if stinger != "none":
         gap += brk["stinger_length"]
     segment_starts = [c["time"] for c in chapters[1:]] if gap > 0 else []
+    hits = {c["time"] for c in chapters[1:] if c.get("music_hit")}
     breaks = {t: gap for t in segment_starts}
 
     def extras_length(xs: list[Extra], in_break: bool) -> float:
@@ -355,7 +361,7 @@ def plan_episode(ep: dict[str, Any], show: dict[str, Any], *, voice_path: Path, 
 
     for t, xs in extras.items():
         breaks[t] = breaks.get(t, 0.0) + extras_length(xs, t in breaks)
-    pieces, to_finished, talk_end = render.conversation(voice_path, kept, talk_at, breaks)
+    pieces, to_finished, talk_end = render.conversation(voice_path, kept, talk_at, breaks, mutes=render.mute_ranges(ep.get("edits", [])))
     plan.pieces += pieces
     plan.talk_start, plan.talk_end = talk_at, talk_end
     for t, xs in extras.items():  # extras in a plain pause; those in a break are placed below
@@ -368,7 +374,13 @@ def plan_episode(ep: dict[str, Any], show: dict[str, Any], *, voice_path: Path, 
         stop = resume - gap - extras_length(xs, True)  # where the previous segment's talking stopped
         if xs:  # after the theme plays on its own, before the stinger
             _extra_pieces(plan, xs, stop + (brk["alone"] if theme != "none" else 0.0), kit_file, gain_of)
-        if theme != "none":
+        if theme != "none" and t in hits:  # music the moment the talk stops (a haiku's punchline)
+            src_start = brk["hit_start"]
+            plan.pieces.append(render.Piece(src=kit_file(theme), channels=2, start=src_start,
+                                            end=src_start + brk["alone"], at=stop, gain_db=brk["theme_gain_db"] + kit_offset,
+                                            fade_in=brk["hit_fade_in"], fade_out=brk["fade_out"], curve="exp",
+                                            kind="music", label="Theme (break, right away)"))
+        elif theme != "none":
             src_start = brk["theme_starts"][n % len(brk["theme_starts"])]
             length = brk["lead_in"] + brk["alone"]
             plan.pieces.append(render.Piece(src=kit_file(theme), channels=2, start=src_start, end=src_start + length,
@@ -553,7 +565,7 @@ def _new_heretics(ep: dict[str, Any], show: dict[str, Any], recipe: dict[str, An
     for t, xs in extras.items():  # extras away from chapters: the talk just pauses for them
         if t not in chapter_times:
             gaps[t] = gaps.get(t, 0.0) + sum(x.length for x in xs)
-    pieces, to_finished, talk_end = render.conversation(voice_path, kept, talk_at, gaps)
+    pieces, to_finished, talk_end = render.conversation(voice_path, kept, talk_at, gaps, mutes=render.mute_ranges(ep.get("edits", [])))
     plan.pieces += pieces
     plan.talk_start, plan.talk_end = talk_at, talk_end
     chapter_at: dict[str, float] = {}

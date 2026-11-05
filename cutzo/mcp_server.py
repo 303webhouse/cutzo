@@ -57,10 +57,20 @@ How to work:
 - Extras (add_extra) are one-off sounds or videos for one episode, like the spooky haiku in Spooky
   Sode's first break: a file on Nick's PC or a show-kit item, at a time in the recording (the talk
   pauses there) or at a chapter (it plays in that chapter's break, before the page flip or stinger).
-- Claude marks: while recording, Nick says "Claude" where something should be cut (get_episode's
-  claude_marks lists each spot with the words around it). Read the transcript there, work out what he
-  meant (usually the flub, aside or false start just before, plus the "Claude" bit itself), cut it
-  with cut_words or cut_section, and tell him what you cut so he can listen.
+- Marks for Claude (get_episode's claude_marks lists each with the words around it; "kind" says which):
+  - "claude": Nick said "Claude" where something should go. Most mentions are just talk about Claude;
+    for an instruction ("Claude, cut everything up to here"), work out what he meant, cut it with
+    cut_words or cut_section, and tell him what you cut so he can listen.
+  - "cut": Nick said "cut" on its own: he wants a music break (The Dig: theme and stinger) there. Read
+    on from the mark and find where the next segment really starts (usually "All right, ..." or the
+    next game or topic); cut from just after the last real sentence before "cut" up to that point
+    (the "cut", the chatter and the pause), and add_chapter at the start with a short segment title.
+  - "haiku": a haiku. Its punchline is the last syllable; add_chapter right after it (at the next words
+    worth keeping, cutting any chatter between) with music_right_away=true, so the break music starts
+    the moment the punchline lands. Tell Nick where it is so he can listen.
+- Pauses: 1-3 s pauses stay (thinking time). Cutzo shortens longer ones to 1 s, and pauses touching a
+  cut or right before a break to half a second, by itself. An "um" or "uh" cut on its own keeps its
+  space (it goes silent, the time stays), so cutting fillers never rushes the conversation.
 - Recordings stopped and started again: several combined recordings play one after another, in the
   order they were added; set_recording_order changes it (then build again).
 - Teaser: when Nick asks for the episode teaser (the short description he posts on RSS.com, Spotify
@@ -227,7 +237,7 @@ def get_episode(
     e = engine.call("GET", _ep(episode))
     out = _episode_brief(e)
     cuts = [x for x in e["edits"] if x["type"] == "cut"]
-    auto = [x for x in cuts if x.get("reason") == "dead air" and x.get("by") == "auto"]
+    auto = [x for x in cuts if x.get("reason") in ("dead air", "pause near cut") and x.get("by") == "auto"]
     shown = cuts if dead_air_details else [x for x in cuts if x not in auto]
     out.update({
         "stages": ", ".join(f"{s['label']}: {s['status']}" for s in e["stages"]),
@@ -235,7 +245,8 @@ def get_episode(
                         "source": m.get("source_label"), "sync": (m.get("sync") or {}).get("offset"),
                         "plays": f"part {m['part']} of {m['parts']}" if m.get("part") else None}
                        for m in e["media"]],
-        "claude_marks": [{"at": k["time_text"], "said": f"...{k['before']} [{k['word']}] {k['after']}...",
+        "claude_marks": [{"at": k["time_text"], "kind": k.get("kind", "claude"),
+                          "said": f"...{k['before']} [{k['word']}] {k['after']}...",
                           "already_cut": k["cut"] or None} for k in e.get("marks") or []] or None,
         "cameras": e.get("cameras") or None,
         "cuts": [{"id": x["id"], "from": x["start_text"], "to": x["end_text"], "why": x.get("reason"),
@@ -245,10 +256,13 @@ def get_episode(
                            "note": "Listed in 'cuts'." if dead_air_details else
                            "Not listed; call get_episode with dead_air_details=true to see them."}
                           if auto else None),
+        "fillers_taken_out": [{"id": x["id"], "at": x["start_text"], "words": x.get("text")}
+                              for x in e["edits"] if x["type"] == "mute"] or None,
         "camera_choices": [{"id": x["id"], "from": x["start_text"], "to": x["end_text"], "angle": x.get("angle"),
                             "by": x.get("by")} for x in e["edits"] if x["type"] == "camera"] or None,
         "chapters": [{"id": c["id"], "at": c["time_text"], "title": c["title"], "in_finished_file": c["output_text"],
-                      "voiced_title": c.get("voiced_title"), "new_segment": c.get("segment") or None}
+                      "voiced_title": c.get("voiced_title"), "new_segment": c.get("segment") or None,
+                      "music_right_away": c.get("music_hit") or None}
                      for c in e["chapters"]],
         "title_graphic": e.get("video_title"),
         "youtube_chapters": e.get("youtube_chapters") or None,
@@ -492,13 +506,30 @@ def add_chapter(
     title: Annotated[str, Field(description="Chapter title (YouTube shows it).")],
     new_segment: Annotated[bool | None, Field(description="The New Heretics: true if this chapter starts a new segment "
                                                           "(a music break plays before it). Leave out for a new topic.")] = None,
+    music_right_away: Annotated[bool | None, Field(description="The Dig: true to start the break music the moment the "
+                                                               "talk before this chapter stops (after a haiku's "
+                                                               "punchline) instead of fading in under it.")] = None,
 ) -> dict[str, Any]:
-    """Add a chapter mark (or rename the one within a second of that time)."""
-    res = engine.call("POST", _ep(episode) + "/chapters", {"time": time, "title": title, "segment": new_segment})
+    """Add a chapter mark (or rename the one within a second of that time). On The Dig every chapter after the
+    first gets a music break (theme, then the pickaxe stinger) before it."""
+    res = engine.call("POST", _ep(episode) + "/chapters", {"time": time, "title": title, "segment": new_segment,
+                                                         "music_hit": music_right_away})
     out = {"done": res["summary"], "in_finished_file": res["chapter"]["output_text"]}
     if res.get("voiced_title"):
         out["voiced_title"] = f"Plays {res['voiced_title']} at this chapter."
     return out
+
+
+@server.tool(annotations=CHANGE, structured_output=False)
+def set_music_right_away(
+    episode: Episode,
+    chapter: Annotated[str, Field(description="The chapter's id (from get_episode).")],
+    right_away: Annotated[bool, Field(description="True: the break music starts the moment the talk stops (a "
+                                                  "haiku's punchline). False: it fades in under the last words.")] = True,
+) -> dict[str, Any]:
+    """The Dig: how the music break before a chapter starts."""
+    res = engine.call("POST", _ep(episode) + f"/chapters/{chapter}/music-hit", {"on": right_away})
+    return {"done": res["summary"]}
 
 
 @server.tool(annotations=CHANGE, structured_output=False)

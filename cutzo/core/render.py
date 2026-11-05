@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import bisect
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,6 +23,7 @@ import numpy as np
 from ..tools import ffmpeg
 from . import audio, timeline
 
+MUTE_FADE = 0.012  # seconds: the fade either side of a muted "um"
 XFADE = 0.012  # seconds of crossfade at every cut in the conversation
 PEAK_MARGIN = 2.0  # dB between the limiter and the true-peak limit (room for encoding overshoot)
 MONO_IN_STEREO_DB = 10 * math.log10(2)  # a one-channel sound played in both channels measures 3 dB louder
@@ -165,13 +166,20 @@ def duck_curve(t: np.ndarray, spans: list[tuple[float, float]], depth_db: float)
     return (10.0 ** (db / 20.0)).astype(np.float32)
 
 
+def mute_ranges(edits: list[dict[str, Any]]) -> list[tuple[float, float]]:
+    """Fillers taken out with their space kept: silent, but the time stays."""
+    return timeline.merge((e["start"], e["end"]) for e in edits if e["type"] == "mute")
+
+
 def conversation(voice_path: Path, kept: list[tuple[float, float]], at: float,
-                 breaks: dict[float, float] | None = None) -> tuple[list[Piece], Callable[[float], float], float]:
+                 breaks: dict[float, float] | None = None,
+                 mutes: list[tuple[float, float]] | None = None) -> tuple[list[Piece], Callable[[float], float], float]:
     """Place the kept stretches of the conversation one after another from `at`.
 
     `breaks` maps a recording time (a chapter start) to seconds of pause inserted just before it
-    (for segment breaks). Returns the pieces, a function mapping recording time -> finished time,
-    and where the talk ends."""
+    (for segment breaks). `mutes` are stretches that stay in the timeline but are silent (an "um"
+    taken out with its space kept). Returns the pieces, a function mapping recording time ->
+    finished time, and where the talk ends."""
     pending = sorted((breaks or {}).items())
     pieces: list[Piece] = []
     spans: list[tuple[float, float, float]] = []  # (recording a, recording b, finished time of a)
@@ -191,6 +199,8 @@ def conversation(voice_path: Path, kept: list[tuple[float, float]], at: float,
             spans.append((x, y, start_at))
             cursor = start_at + (y - x)
     talk_end = cursor
+    if mutes:
+        pieces = _silence(pieces, mutes)
 
     def to_finished(t: float) -> float:
         for x, y, f in spans:
@@ -202,6 +212,26 @@ def conversation(voice_path: Path, kept: list[tuple[float, float]], at: float,
         return talk_end
 
     return pieces, to_finished, talk_end
+
+
+def _silence(pieces: list[Piece], mutes: list[tuple[float, float]]) -> list[Piece]:
+    """Split the conversation's pieces around the muted stretches: the time stays, the sound goes (with
+    short fades either side, so the edges don't click)."""
+    out: list[Piece] = []
+    for p in pieces:
+        holes = [(max(a, p.start), min(b, p.end)) for a, b in mutes if a < p.end and b > p.start]
+        if not holes:
+            out.append(p)
+            continue
+        cursor = p.start
+        for a, b in holes + [(p.end, p.end)]:
+            if a - cursor > 0.01:
+                first, last = cursor == p.start, a >= p.end
+                out.append(replace(p, start=cursor, end=a, at=p.at + (cursor - p.start),
+                                   fade_in=p.fade_in if first else MUTE_FADE,
+                                   fade_out=p.fade_out if last else MUTE_FADE))
+            cursor = max(cursor, b)
+    return out
 
 
 def mix(plan: Plan, dst: Path, *, check: Callable[[], None] | None = None,

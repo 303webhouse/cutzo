@@ -737,7 +737,9 @@ class Cutzo:
         ep = self._load(ep_id)
         settings = {**buildlib.DEAD_AIR, **(ep.get("dead_air") or {})}
         cuts, levels = buildlib.find_dead_air(self._ep_dir(ep_id) / "voice.f32", longer_than=float(settings["longer_than"]),
-                                              keep=float(settings["keep"]), threshold_db=settings.get("threshold_db"))
+                                              keep=float(settings["keep"]), threshold_db=settings.get("threshold_db"),
+                                              near=settings.get("near"))
+        pauses = levels.pop("pauses", None)
         dismissed = [tuple(r) for r in ep.get("dismissed", [])]
         cuts = [c for c in cuts if not any(c["start"] < b and a < c["end"] for a, b in dismissed)]
         with self._lock:
@@ -750,6 +752,8 @@ class Cutzo:
                 made.append(edit)
             ep["dead_air"] = {"longer_than": settings["longer_than"], "keep": settings["keep"],
                               "threshold_db": settings.get("threshold_db"), "measured": levels}
+            if pauses is not None:
+                ep["dead_air"].update(near=settings["near"], near_keep=settings["near_keep"], pauses=pauses)
             ep.pop("needs_rebuild", None)
             self._save(ep)
         return made
@@ -821,7 +825,7 @@ class Cutzo:
             raise CutzoError("This episode hasn't been transcribed yet.",
                              hint="Build the episode first; transcription is one of its steps.")
         self._log_read(source, "get_transcript", f"read the transcript of {_q(ep['title'], 40)}", ep["id"])
-        cuts = self._cuts(ep)
+        cuts = self._hidden(ep)
         out: dict[str, Any] = {
             "episode": ep["id"],
             "title": ep["title"],
@@ -1011,14 +1015,22 @@ class Cutzo:
             b = min(b, duration)
             if b - a < 0.05:
                 raise CutzoError("That's too short to cut (under a twentieth of a second).")
+            mute = False
             if reason == "words" and not ep.get("sample"):
+                all_words = self._transcript(ep["id"]).get("words", [])
+                run = cutpoints.words_in(all_words, a, b) if all_words else None
+                mute = bool(run) and self._only_fillers(all_words, run[0], run[1])
                 a, b = self._word_cut_points(ep, a, b)
             self._check_big_cut(b - a, duration, confirm)
             words = self._words_between(ep["id"], a, b)
-            edit = self._new_edit(ep, type="cut", start=a, end=b, reason=reason, text=words, by=source)
+            if mute:
+                edit = self._new_edit(ep, type="mute", start=a, end=b, reason="filler word", text=words, by=source)
+                summary = f"Took out \u201c{_q(words)}\u201d at {fmt_time(a, precise=True)}, keeping the pause"
+            else:
+                edit = self._new_edit(ep, type="cut", start=a, end=b, reason=reason, text=words, by=source)
+                summary = f"Cut {fmt_time(a, precise=True)}\u2013{fmt_time(b, precise=True)} ({b - a:.1f} s)" + (
+                    f": \u201c{_q(words)}\u201d" if words else "")
             ep["edits"].append(edit)
-            summary = f"Cut {fmt_time(a, precise=True)}\u2013{fmt_time(b, precise=True)} ({b - a:.1f} s)" + (
-                f": \u201c{_q(words)}\u201d" if words else "")
             self._push_history(ep, {"op": "add_edits", "ids": [edit["id"]], "summary": summary})
             self._save(ep)
         self._log(source, "cut_section", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
@@ -1038,7 +1050,7 @@ class Cutzo:
             if not hits:
                 raise NotFound(f"Couldn't find \u201c{_q(text)}\u201d in the transcript.",
                                hint="Use the exact words as they appear in the transcript.")
-            cuts = self._cuts(ep)
+            cuts = self._hidden(ep)
             fresh = [h for h in hits if not all(tx.is_word_cut(words[i], cuts) for i in range(*h))]
             if not fresh:
                 raise CutzoError(f"\u201c{_q(text)}\u201d is already cut.")
@@ -1070,10 +1082,16 @@ class Cutzo:
                     a, b = round(max(0.0, a - 0.02), 3), round(min(float(ep["duration"]), b + 0.04), 3)
                 else:
                     a, b = cutpoints.word_cut(self._ep_dir(ep["id"]) / "voice.f32", words, i, j, float(ep["duration"]))
-                made.append(self._new_edit(ep, type="cut", start=a, end=b, reason="words", text=said, by=source))
+                if self._only_fillers(words, i, j) and not ep.get("sample"):
+                    made.append(self._new_edit(ep, type="mute", start=a, end=b, reason="filler word", text=said, by=source))
+                else:
+                    made.append(self._new_edit(ep, type="cut", start=a, end=b, reason="words", text=said, by=source))
             ep["edits"].extend(made)
             where = ", ".join(fmt_time(m["start"]) for m in made)
-            summary = f"Cut the words \u201c{_q(text)}\u201d at {where}"
+            if all(m["type"] == "mute" for m in made):
+                summary = f"Took out \u201c{_q(text)}\u201d at {where}, keeping the pause"
+            else:
+                summary = f"Cut the words \u201c{_q(text)}\u201d at {where}"
             self._push_history(ep, {"op": "add_edits", "ids": [m["id"] for m in made], "summary": summary})
             self._save(ep)
         self._log(source, "cut_words", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
@@ -1092,7 +1110,7 @@ class Cutzo:
             if edit["type"] == "cut" and edit.get("by") == "auto" and not ep.get("sample"):
                 # Remember it, so finding dead air again doesn't suggest it a second time.
                 ep.setdefault("dismissed", []).append([edit["start"], edit["end"]])
-            if edit["type"] == "cut":
+            if edit["type"] in ("cut", "mute"):
                 summary = f"Brought back {fmt_time(edit['start'], precise=True)}\u2013{fmt_time(edit['end'], precise=True)}" + (
                     f" (\u201c{_q(edit['text'])}\u201d)" if edit.get("text") else "")
             else:
@@ -1124,9 +1142,10 @@ class Cutzo:
         return {"edit": self._edit_view(edit, ep), "summary": summary}
 
     def add_chapter(self, episode: str, time: Any, title: str, source: str = "you",
-                    segment: bool | None = None) -> dict[str, Any]:
+                    segment: bool | None = None, music_hit: bool | None = None) -> dict[str, Any]:
         """Add (or rename) a chapter. `segment`: for shows with music breaks between segments (The New
-        Heretics), whether this chapter starts a new segment, with a break before it."""
+        Heretics), whether this chapter starts a new segment, with a break before it. `music_hit` (The Dig):
+        the break music starts the moment the talk before it stops, as after a haiku's punchline."""
         with self._lock:
             ep = self._load(self.resolve_episode(episode))
             self._require_built(ep)
@@ -1144,6 +1163,8 @@ class Cutzo:
                 near.update(title=title, by=source)
                 if segment is not None:
                     near["segment"] = bool(segment)
+                if music_hit is not None:
+                    near["music_hit"] = bool(music_hit)
                 summary = f"Renamed the chapter at {fmt_time(near['time'])} to \u201c{title}\u201d"
                 self._push_history(ep, {"op": "update_chapter", "before": before, "summary": summary})
                 chapter = near
@@ -1151,6 +1172,8 @@ class Cutzo:
                 chapter = self._new_chapter(ep, t, title, by=source)
                 if segment:
                     chapter["segment"] = True
+                if music_hit:
+                    chapter["music_hit"] = True
                 ep["chapters"].append(chapter)
                 ep["chapters"].sort(key=lambda c: c["time"])
                 kind = "segment" if segment else "chapter"
@@ -1187,6 +1210,32 @@ class Cutzo:
             self._push_history(ep, {"op": "update_chapter", "before": before, "summary": summary})
             self._save(ep)
         self._log(source, "set_segment", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
+        show = showlib.get_show(ep["show"]) or {}
+        return {"chapter": self._chapter_view(chapter, ep, show), "summary": summary}
+
+    def set_music_hit(self, episode: str, chapter_id: str, on: Any = True, source: str = "you") -> dict[str, Any]:
+        """The Dig: whether the break before this chapter starts its music the moment the talk stops (after a
+        haiku's punchline) instead of fading in under the last words."""
+        on = on if isinstance(on, bool) else str(on).strip().lower() in ("1", "true", "yes", "on")
+        with self._lock:
+            ep = self._load(self.resolve_episode(episode))
+            ordered = sorted(ep["chapters"], key=lambda c: c["time"])
+            chapter = next((c for c in ordered if c["id"] == chapter_id), None)
+            if not chapter:
+                raise NotFound(f"No chapter called {chapter_id!r} in this episode.")
+            if on and chapter is ordered[0]:
+                raise CutzoError("The first chapter starts the episode, so there's no break before it.")
+            before = dict(chapter)
+            if on:
+                chapter["music_hit"] = True
+            else:
+                chapter.pop("music_hit", None)
+            what = ("has its music start right after the last word" if on
+                    else "has its music fade in under the last words")
+            summary = f"The break before \u201c{chapter['title']}\u201d {what}"
+            self._push_history(ep, {"op": "update_chapter", "before": before, "summary": summary})
+            self._save(ep)
+        self._log(source, "set_music_hit", f"{summary} in {_q(ep['title'], 40)}", ep["id"])
         show = showlib.get_show(ep["show"]) or {}
         return {"chapter": self._chapter_view(chapter, ep, show), "summary": summary}
 
@@ -2282,8 +2331,47 @@ class Cutzo:
         return data
 
     def _save(self, ep: dict[str, Any]) -> None:
+        self._trim_pauses(ep)
         ep["updated"] = now_iso()
         write_json(self.guard.writable(self._project_path(ep["id"])), ep)
+
+    PAUSE_REACH = 0.35  # a cut edge or chapter this close to a pause counts as touching it
+
+    def _trim_pauses(self, ep: dict[str, Any]) -> None:
+        """Pauses of 1-3 s stay (Nick, Nov 5), except right before a music break (a chapter) or touching
+        something cut: those shrink to `near_keep`, so cut material and breaks don't leave a hole. Worked out
+        again on every save, so they follow cuts and chapters as they change; one brought back stays back."""
+        settings = ep.get("dead_air") or {}
+        pauses = settings.get("pauses")
+        edits = ep.get("edits", [])
+        if ep.get("sample") or pauses is None:
+            return
+        keep = float(settings.get("near_keep", 0.5))
+        reach = self.PAUSE_REACH
+        manual = [e for e in edits if e["type"] == "cut" and not (e.get("by") == "auto")]
+        edges = [e["start"] for e in manual] + [e["end"] for e in manual]
+        breaks = sorted(c["time"] for c in ep.get("chapters", []))[1:]  # the first chapter starts the talk: no break
+        dismissed = [tuple(r) for r in ep.get("dismissed", [])]
+        others = timeline.merge((e["start"], e["end"]) for e in edits
+                                if e["type"] == "cut" and e.get("reason") != "pause near cut")
+        made = []
+        for a, b in pauses:
+            if b - a <= keep + 0.05:
+                continue
+            touches = any(a - reach <= t <= b + reach for t in edges)
+            before_break = any(a - reach <= t <= b + 0.6 for t in breaks)
+            if not (touches or before_break):
+                continue
+            ca, cb = round(a + keep / 2, 3), round(b - keep / 2, 3)
+            if any(ca < y and x < cb for x, y in dismissed):
+                continue
+            if any(x <= ca and cb <= y for x, y in others):  # already gone
+                continue
+            made.append({"id": f"p{int(round(ca * 1000))}", "type": "cut", "start": ca, "end": cb, "by": "auto",
+                         "reason": "pause near cut", "text": f"{b - a:.1f} s pause " +
+                         ("before a break" if before_break else "next to a cut")})
+        kept = [e for e in edits if not (e.get("by") == "auto" and e.get("reason") == "pause near cut")]
+        ep["edits"] = kept + made
 
     def _transcript(self, ep_id: str) -> dict[str, Any]:
         data = read_json(self._ep_dir(ep_id) / "transcript.json")
@@ -2388,6 +2476,15 @@ class Cutzo:
 
     def _cuts(self, ep: dict[str, Any]) -> list[tuple[float, float]]:
         return timeline.merge((e["start"], e["end"]) for e in ep.get("edits", []) if e["type"] == "cut")
+
+    def _hidden(self, ep: dict[str, Any]) -> list[tuple[float, float]]:
+        """What isn't heard: cuts plus muted fillers (an "um" taken out with its space kept)."""
+        return timeline.merge((e["start"], e["end"]) for e in ep.get("edits", []) if e["type"] in ("cut", "mute"))
+
+    def _only_fillers(self, words: list[dict[str, Any]], i: int, j: int) -> bool:
+        """Every word from i to j is an "um", "uh" and the like: take them out but keep their space (Nick,
+        Nov 5: shortening the conversation at every hesitation sounds rushed)."""
+        return j > i and all(re.sub(r"[^a-z]", "", str(w["w"]).lower()) in captionslib.FILLERS for w in words[i:j])
 
     def _final_duration(self, ep: dict[str, Any]) -> float | None:
         if not ep.get("duration"):
@@ -2519,8 +2616,8 @@ class Cutzo:
             "length_text": fmt_duration(ep["duration"]) if ep.get("duration") else "Not built yet",
             "final_text": fmt_duration(final) if final is not None else None,
             "cut_count": sum(1 for e in ep.get("edits", []) if e["type"] == "cut"),
-            "pause_count": sum(1 for e in ep.get("edits", []) if e["type"] == "cut" and e.get("reason") == "dead air"
-                               and e.get("by") == "auto"),
+            "pause_count": sum(1 for e in ep.get("edits", []) if e["type"] == "cut"
+                               and e.get("reason") in ("dead air", "pause near cut") and e.get("by") == "auto"),
             "chapter_count": len(ep.get("chapters", [])),
             "media_count": len(ep.get("media", [])),
             "export_count": sum(1 for x in ep.get("exports", []) if x["status"] == "done"),
@@ -2531,23 +2628,50 @@ class Cutzo:
         }
 
     MARK_WORDS = {"claude", "claud", "clawed", "clod", "klaud", "claudes"}
+    HAIKU_WORDS = {"haiku", "haikus", "haikoo", "hiku"}
+    CUE_GAP = 0.4  # "cut" on its own: this much quiet before and after it (or a sentence end)
 
     def _marks(self, ep: dict[str, Any]) -> list[dict[str, Any]]:
-        """Spots where someone said "Claude" while recording: Nick's sign for "Claude, cut around here".
-        Each has its recording time, the words around it and whether it already falls inside a cut."""
+        """Spots in the recording meant for Claude, each with its recording time, the words around it and
+        whether it already falls inside a cut. Kinds: "claude" (someone said "Claude": usually "cut around
+        here"), "cut" (Nick said "cut" on its own: a music break goes here; find where the next segment
+        starts) and "haiku" (a haiku: its punchline gets the break music right away)."""
         words = self._transcript(ep["id"]).get("words", [])
         cuts = self._cuts(ep)
         out: list[dict[str, Any]] = []
         for i, w in enumerate(words):
-            if re.sub(r"[^a-z]", "", str(w["w"]).lower()) not in self.MARK_WORDS:
+            bare = re.sub(r"[^a-z]", "", str(w["w"]).lower())
+            if bare in self.MARK_WORDS:
+                kind = "claude"
+            elif bare in self.HAIKU_WORDS:
+                kind = "haiku"
+            elif bare == "cut" and self._said_alone(words, i):
+                kind = "cut"
+            else:
                 continue
             t = float(w["s"])
             before = " ".join(x["w"] for x in words[max(0, i - 25):i])
             after = " ".join(x["w"] for x in words[i + 1:i + 26])
-            out.append({"time": round(t, 3), "time_text": fmt_time(t), "word": w["w"],
-                        "before": before, "after": after,
-                        "cut": tx.is_word_cut(w, cuts)})
+            cut = tx.is_word_cut(w, cuts)
+            if kind == "haiku":  # handled once a "music right away" break follows it
+                handled = any(t <= c["time"] <= t + 180 and c.get("music_hit") for c in ep.get("chapters", []))
+            elif kind == "cut":  # handled once it's cut and a chapter (a break) follows it
+                handled = cut and any(t <= c["time"] <= t + 180 for c in ep.get("chapters", []))
+            else:
+                handled = cut
+            out.append({"time": round(t, 3), "time_text": fmt_time(t), "word": w["w"], "kind": kind,
+                        "before": before, "after": after, "cut": cut, "handled": handled})
         return out
+
+    def _said_alone(self, words: list[dict[str, Any]], i: int) -> bool:
+        """The word stands on its own: a pause or a sentence end before it, and one after it ("...so yeah.
+        Cut. All right, ..."), not "cut that out" or "a pay cut"."""
+        w = words[i]
+        prev = words[i - 1] if i > 0 else None
+        nxt = words[i + 1] if i + 1 < len(words) else None
+        alone_before = prev is None or float(w["s"]) - float(prev["e"]) >= self.CUE_GAP or str(prev["w"]).rstrip()[-1:] in ".!?"
+        alone_after = nxt is None or float(nxt["s"]) - float(w["e"]) >= self.CUE_GAP or str(w["w"]).rstrip()[-1:] in ".!?"
+        return alone_before and alone_after
 
     def _media_view(self, ep: dict[str, Any]) -> list[dict[str, Any]]:
         """The recordings, with "part"/"parts" when several combined recordings play one after another."""
@@ -2587,7 +2711,7 @@ class Cutzo:
         cuts = self._cuts(ep)
         out_t = layout_time if layout_time is not None else timeline.to_output(c["time"], cuts)
         voiced = showlib.segment_title_for(show, c["title"])
-        return {**c, "segment": bool(c.get("segment")), "time_text": fmt_time(c["time"]), "output_time": out_t,
+        return {**c, "segment": bool(c.get("segment")), "music_hit": bool(c.get("music_hit")), "time_text": fmt_time(c["time"]), "output_time": out_t,
                 "output_text": fmt_time(out_t), "voiced_title": voiced["name"] if voiced else None}
 
     def _view(self, ep: dict[str, Any]) -> dict[str, Any]:

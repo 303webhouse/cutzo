@@ -431,8 +431,37 @@ def test_real_build_review_and_export(real_episode):
     ep = app.get_episode(ep_id)
     stages = {s["key"]: s["status"] for s in ep["stages"]}
     assert stages["transcribe"] == "later" and stages["auto_edit"] == "done" and ep["stage"] == "review"
+    # Pauses of 1-3 s stay (Nick, Nov 5): none of these gaps is longer than 3 s.
+    assert not [e for e in ep["edits"] if e["reason"] in ("dead air", "pause near cut")]
+    assert ep["dead_air"]["longer_than"] == 3.0 and ep["dead_air"]["keep"] == 1.0
+    stored = app._load(ep_id)["dead_air"]["pauses"]
+    assert len(stored) == 12  # the 1.6, 2.5 and 3.0 s gaps, four times over
+
+    # ...except next to a cut or right before a break: those shrink to half a second.
+    a, b = stored[1]
+    cut = app.cut_section(ep_id, b + 0.05, b + 1.0)["edit"]
+    near = [e for e in app.get_episode(ep_id)["edits"] if e["reason"] == "pause near cut"]
+    assert len(near) == 1 and near[0]["start"] == pytest.approx(a + 0.25) and near[0]["end"] == pytest.approx(b - 0.25)
+    app.restore_cut(ep_id, cut["id"])
+    assert not [e for e in app.get_episode(ep_id)["edits"] if e["reason"] == "pause near cut"]
+    a2, b2 = stored[4]
+    opening = app.add_chapter(ep_id, 0, "Opening")["chapter"]  # the first chapter has no break before it
+    assert not [e for e in app.get_episode(ep_id)["edits"] if e["reason"] == "pause near cut"]
+    chapter = app.add_chapter(ep_id, b2 + 0.1, "After the pause")["chapter"]
+    near = [e for e in app.get_episode(ep_id)["edits"] if e["reason"] == "pause near cut"]
+    assert len(near) == 1 and near[0]["text"].endswith("before a break")
+    app.restore_cut(ep_id, near[0]["id"])  # brought back: stays back
+    assert not [e for e in app.get_episode(ep_id)["edits"] if e["reason"] == "pause near cut"]
+    app.remove_chapter(ep_id, chapter["id"])
+    app.remove_chapter(ep_id, opening["id"])
+    raw = app._load(ep_id)
+    raw["dismissed"] = []  # start the older checks below from a clean slate
+    app._save(raw)
+
+    app.set_dead_air(ep_id, longer_than=1.0, keep=0.5)
+    ep = app.get_episode(ep_id)
     dead = [e for e in ep["edits"] if e["reason"] == "dead air"]
-    assert len(dead) == 12  # the 1.6, 2.5 and 3.0 s gaps, four times over
+    assert len(dead) == 12
     files = {p.name for p in (app.library / "episodes" / ep_id).iterdir()}
     assert {"voice.f32", "original.f32", "preview.m4a", "original.m4a"} <= files and "work" not in files
     assert app.preview_audio(ep_id).name == "preview.m4a"
@@ -606,3 +635,26 @@ def test_sign_off_timing_moves_the_cold_out():
     ep["sign_off_after"] = 9.5
     plan, clip = sign_off(ep)
     assert clip.at == pytest.approx(plan.talk_end + 9.5)
+
+
+def test_dig_music_right_away_after_a_haiku():
+    from cutzo.core import shows
+
+    show = shows.get_show("the-dig")
+    ep = _ep(chapters=(0, 200, 400))
+    ep["chapters"][1]["music_hit"] = True
+    ep["edits"].append({"type": "mute", "start": 100.0, "end": 100.4})  # an "um" with its space kept
+    plan = recipes.plan_episode(ep, show, voice_path=Path("v.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
+                                kit_file=lambda a: Path(a), length_of=lambda a: 1e9)
+    brk = recipes.THE_DIG["break"]
+    hit = [p for p in plan.pieces if p.label == "Theme (break, right away)"]
+    normal = [p for p in plan.pieces if p.label == "Theme (break)"]
+    assert len(hit) == 1 and len(normal) == 1
+    stop = plan.talk_start + 200.0  # the punchline's end: no fade-in under the talk, the music starts there
+    assert hit[0].at == pytest.approx(stop, abs=0.01) and hit[0].start == brk["hit_start"]
+    assert hit[0].fade_in == brk["hit_fade_in"] and hit[0].end - hit[0].start == brk["alone"]
+    assert normal[0].at < plan.talk_start + 400 + brk["alone"] + brk["stinger_length"] - brk["lead_in"] + 0.5
+    # The muted "um" is silent but the talk keeps its length.
+    talk = [p for p in plan.pieces if p.label == "Conversation"]
+    assert any(p.end == pytest.approx(100.0) for p in talk) and any(p.start == pytest.approx(100.4) for p in talk)
+    assert sum(p.end - p.start for p in talk) == pytest.approx(600.0 - 0.4, abs=0.01)

@@ -150,6 +150,20 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
   finished layout (`render.mix(window=...)`, levelled to the MP3's loudness) into `section-<which>.m4a`
   (route `/section-preview`, played via `/section-audio`). `set_sign_off_timing` (`ep["sign_off_after"]`,
   The Dig's default 3 s) moves the cold out against the ending music; both sit under the picks on Review.
+- Nov 5 (Nick, before recording a Dig): (1) an "um"/"uh" cut on its own keeps its space: `cut_words` and
+  word selections made only of fillers (`captions.FILLERS`) become `type: "mute"` edits (reason "filler
+  word"): not in `_cuts`/the timeline, silent in `render.conversation(mutes=...)` (pieces split with
+  12 ms fades), muted by the Review player; `_hidden` = cuts + mutes for showing words as taken out.
+  (2) Dead air: `build.DEAD_AIR` is now longer than 3 s -> 1 s (episodes keep their stored settings);
+  `find_dead_air(near=1.0)` stores every pause of 1 s+ in `ep["dead_air"]["pauses"]`, and
+  `Cutzo._trim_pauses` (run by `_save`) shrinks the ones touching a manual cut or right before a chapter
+  other than the first to 0.5 s ("pause near cut" edits by auto, ids `p<ms>`; brought back = dismissed).
+  (3) Marks now have kinds: "claude", "cut" (the word said on its own, `_said_alone`: a music break goes
+  there; Claude finds where the next segment starts, cuts the gap and adds a chapter) and "haiku";
+  `handled` says when they're done. (4) The Dig's "music right away" break (`chapter.music_hit`,
+  `set_music_hit`, connector `set_music_right_away` / `add_chapter(music_right_away=)`, a tick on Review's
+  chapters): the theme starts at `break.hit_start` (20.58 s, before its last stab and the band) the moment
+  the talk stops, for a haiku's punchline.
 - Episode folders hold `voice.f32` (cleaned talk, recording time), `original.f32`, the two
   previews, `transcript.json`, `waveform-*.json` caches and `inserts/` (extras' copies). Exports
   render `mix.f32` then delete it (video exports also use `work-export/`, deleted after).

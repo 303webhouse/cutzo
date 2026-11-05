@@ -304,6 +304,22 @@ def test_build_transcribes_and_words_cut_cleanly(real_dig, monkeypatch):
     sel = app.cut_section(ep_id, true[0][0] + 0.06 - 0.02, true[0][1] - 0.05 + 0.04, reason="words")["edit"]
     assert sel["start"] < true[0][0] and true[0][1] < sel["end"] < true[1][0], (sel, true)
     assert sel["text"] == "Um,"
+    # An "um" on its own keeps its space (Nick, Nov 5): silent, but the conversation isn't shortened.
+    assert sel["type"] == "mute" and sel["reason"] == "filler word"
+    ep = app.get_episode(ep_id)
+    assert ep["final_duration"] == pytest.approx(ep["duration"] - sum(
+        e["end"] - e["start"] for e in ep["edits"] if e["type"] == "cut"), abs=0.01)
+    words = [w for p in app.get_transcript(ep_id, fmt="words")["paragraphs"] for w in p["words"]]
+    assert words[0]["cut"] and not words[1]["cut"]  # shown as taken out
+    from cutzo.core import render
+
+    pieces, _, end = render.conversation(Path("v.f32"), [(0.0, 10.0)], 5.0, mutes=[(sel["start"], sel["end"])])
+    assert end == pytest.approx(15.0) and len(pieces) == 2
+    assert pieces[0].end == pytest.approx(sel["start"]) and pieces[1].start == pytest.approx(sel["end"])
+    assert pieces[1].at == pytest.approx(5.0 + sel["end"])  # time kept
+    with pytest.raises(CutzoError):
+        app.cut_words(ep_id, "Um,")  # already taken out
+    app.undo(ep_id)
 
     # The teaser brief reads the edited transcript without fillers; the teaser lands beside the exports.
     brief = app.teaser_brief(ep_id, source="claude")
@@ -415,7 +431,19 @@ def test_combined_recordings_play_one_after_another(tmp_path, monkeypatch):
             {"w": w, "s": 0.4 * k, "e": 0.4 * k + 0.3} for k, w in enumerate("so um Claude, cut that please".split())]})
         marks = app.get_episode(ep_id)["marks"]
         assert len(marks) == 1 and marks[0]["word"] == "Claude," and marks[0]["before"] == "so um" and not marks[0]["cut"]
+        assert marks[0]["kind"] == "claude" and not marks[0]["handled"]
         app.cut_section(ep_id, 0.3, 2.0)
-        assert app.get_episode(ep_id)["marks"][0]["cut"]
+        assert app.get_episode(ep_id)["marks"][0]["cut"] and app.get_episode(ep_id)["marks"][0]["handled"]
+
+        # "Cut" said on its own asks for a music break; a haiku gets its music right away.
+        said = [("good", 0.0, 0.3), ("stuff.", 0.35, 0.7), ("Cut.", 1.4, 1.7), ("All", 2.6, 2.8), ("right", 2.8, 3.0),
+                ("haiku", 3.2, 3.6), ("time", 3.6, 3.9), ("a", 4.0, 4.1), ("pay", 4.1, 4.3), ("cut", 4.3, 4.5),
+                ("hurts", 4.5, 4.9)]
+        app._save_transcript(ep_id, {"words": [{"w": w, "s": a, "e": b} for w, a, b in said]})
+        kinds = [(k["word"], k["kind"], k["handled"]) for k in app.get_episode(ep_id)["marks"]]
+        assert kinds == [("Cut.", "cut", False), ("haiku", "haiku", False)]  # not "a pay cut"
+        chapter = app.add_chapter(ep_id, 4.95, "After the haiku", music_hit=True)["chapter"]
+        assert chapter["music_hit"] and app.get_episode(ep_id)["marks"][1]["handled"]
+        assert not app.set_music_hit(ep_id, chapter["id"], False)["chapter"]["music_hit"]
     finally:
         app.jobs.shutdown()
