@@ -658,3 +658,42 @@ def test_dig_music_right_away_after_a_haiku():
     talk = [p for p in plan.pieces if p.label == "Conversation"]
     assert any(p.end == pytest.approx(100.0) for p in talk) and any(p.start == pytest.approx(100.4) for p in talk)
     assert sum(p.end - p.start for p in talk) == pytest.approx(600.0 - 0.4, abs=0.01)
+
+
+@needs_ffmpeg
+def test_tv_effect_copies_keep_their_loudness(tmp_path):
+    from cutzo.core import effects
+
+    rate = audio.RATE
+    noise = (np.random.default_rng(3).standard_normal(rate * 6) * 0.1).astype("<f4")
+    voice = tmp_path / "voice.f32"
+    noise.tofile(voice)
+    folder = tmp_path / "clips"
+    path, a, b = effects.clip("tv", voice, 1.0, 4.0, folder)
+    assert a == pytest.approx(effects.PAD) and b - a == pytest.approx(3.0)
+    assert sorted(p.name for p in folder.iterdir()) == [path.name]  # no working files left behind
+    y = np.fromfile(path, dtype="<f4")
+    spec_in = np.abs(np.fft.rfft(noise[rate:rate * 4])) ** 2
+    spec_out = np.abs(np.fft.rfft(y[int(a * rate):int(b * rate)])) ** 2
+    f = np.fft.rfftfreq(3 * rate, 1 / rate)
+
+    def band(spec, lo, hi):
+        return 10 * np.log10(spec[(f >= lo) & (f < hi)].mean())
+
+    shape = [band(spec_out, lo, hi) - band(spec_in, lo, hi) for lo, hi in ((150, 220), (900, 1200), (5500, 7000))]
+    assert shape[1] - shape[0] > 12 and shape[1] - shape[2] > 15  # thin and boxy: a TV speaker
+    assert path == effects.clip("tv", voice, 1.0, 4.0, folder)[0]  # made once, reused
+
+
+def test_dig_clips_sound_like_tv_and_music_dips_under_voices_and_bites():
+    from cutzo.core import shows
+
+    show = shows.get_show("the-dig")
+    ep = _ep(chapters=(0, 200), cold=((500, 510),), outro=((580, 590),))
+    plan = recipes.plan_episode(ep, show, voice_path=Path("v.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
+                                kit_file=lambda a: Path(a), length_of=lambda a: 1e9)
+    effects = {p.label: p.effect for p in plan.pieces}
+    assert effects["Cold open"] == effects["Sign-off"] == "tv" and effects["Conversation"] == ""
+    assert plan.duck_db == 8.0
+    bites = [p for p in plan.pieces if p.label == "Sound bite"]
+    assert any(a <= bites[0].at and bites[0].until <= b for a, b in plan.voice_spans())

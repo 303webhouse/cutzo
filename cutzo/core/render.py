@@ -52,6 +52,7 @@ class Piece:
     # fades: "linear" (crossfades at cuts), "exp" (rises evenly in decibels from -50 dB) or "premiere"
     # (evenly from -30 dB, the shape of Nick's music fade-ins in Spooky Sode, measured Oct 15, 2026)
     curve: str = "linear"
+    effect: str = ""  # a sound effect made on a copy before mixing (core/effects.py), e.g. "tv"
 
     @property
     def length(self) -> float:
@@ -133,9 +134,9 @@ class Plan:
         return max(ends, default=0.0)
 
     def voice_spans(self) -> list[tuple[float, float]]:
-        """When someone is talking on the finished timeline (gaps under DUCK_JOIN joined)."""
+        """When someone is talking on the finished timeline, sound bites included (gaps under DUCK_JOIN joined)."""
         spans: list[list[float]] = []
-        for a, b in sorted((p.at, p.until) for p in self.pieces if p.kind == "voice" and p.length > 0):
+        for a, b in sorted((p.at, p.until) for p in self.pieces if p.kind in ("voice", "bite") and p.length > 0):
             if spans and a <= spans[-1][1] + DUCK_JOIN:
                 spans[-1][1] = max(spans[-1][1], b)
             else:

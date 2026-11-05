@@ -48,7 +48,7 @@ EXTRA_VIDEO_FADE = 0.3  # a video extra dissolves in and out over this long
 THE_DIG: dict[str, Any] = {
     "intro": {
         "cold_open_at": 0.5,
-        "cold_open_gain_db": 5.5,  # Premiere had 4.0
+        "cold_open_gain_db": 8.5,  # Premiere had 4.0; Nick (Nov 5): voices over the music a bit louder
         # Where Nick's cold open ended, just before the full band comes in (about 21 s into the theme). A shorter
         # cold open leaves the music where it is; a longer one moves the theme, bites and talk later by as much,
         # so the band still comes in after it.
@@ -89,12 +89,15 @@ THE_DIG: dict[str, Any] = {
         "lead_in": 18.0,
         "theme_gain_db": -2.55,  # Premiere had 0.45
         "clips_after": 3.0,  # sign-off clips start this long after the talking ends
-        "clips_gain_db": 8.0,  # Premiere had 6.5
+        "clips_gain_db": 11.0,  # Premiere had 6.5; Nick (Nov 5): voices over the music a bit louder
         "tail": 7.2,  # theme keeps playing this long after the last clip
         "fade_out": 10.0,
         "no_clips_tail": 20.0,
     },
-    "duck_db": 5.0,  # the theme dips this much while someone talks over it
+    "duck_db": 8.0,  # the theme dips this much while someone talks (or a sound bite plays) over it; 5 until Nov 5
+    # The cold open and sign-off clips sound like they come from a TV (Nick's "From the television" preset in
+    # Premiere): it tells the listener they're a preview or a bonus, not the show itself.
+    "clip_effect": "tv",
     "max_cold_open": 45.0,
     "max_outro": 60.0,
 }
@@ -324,7 +327,8 @@ def plan_episode(ep: dict[str, Any], show: dict[str, Any], *, voice_path: Path, 
     for k, (a, b) in enumerate(cold):
         plan.pieces.append(render.Piece(src=voice_path, channels=1, start=a, end=b, at=cursor - (render.XFADE if k else 0),
                                         gain_db=intro["cold_open_gain_db"], fade_in=render.XFADE if k else 0.05,
-                                        fade_out=render.XFADE, kind="voice", label="Cold open"))
+                                        fade_out=render.XFADE, kind="voice", label="Cold open",
+                                        effect=recipe.get("clip_effect", "")))
         cursor += (b - a) - (render.XFADE if k else 0)
     cold_end = cursor if cold else 0.0
     if not cold and theme == "none" and montage == "none":
@@ -400,7 +404,8 @@ def plan_episode(ep: dict[str, Any], show: dict[str, Any], *, voice_path: Path, 
     for k, (a, b) in enumerate(outro):
         plan.pieces.append(render.Piece(src=voice_path, channels=1, start=a, end=b, at=cursor - (render.XFADE if k else 0),
                                         gain_db=end["clips_gain_db"], fade_in=render.XFADE if k else 0.05,
-                                        fade_out=render.XFADE, kind="voice", label="Sign-off"))
+                                        fade_out=render.XFADE, kind="voice", label="Sign-off",
+                                        effect=recipe.get("clip_effect", "")))
         cursor += (b - a) - (render.XFADE if k else 0)
     if theme != "none":
         stop = (cursor + end["tail"]) if outro else (talk_end + end["no_clips_tail"])

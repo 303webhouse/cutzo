@@ -11,6 +11,7 @@ the cleaned audio (see build.py and voice.py). Transcripts arrive in Phase 3.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import platform
@@ -27,6 +28,7 @@ from .. import tools as toolbox
 from ..tools import ffmpeg
 from . import audio, cutpoints, kit, presets, recipes, render, sample, timeline, titles
 from . import captions as captionslib
+from . import effects
 from . import video as videolib
 from . import build as buildlib
 from . import shows as showlib
@@ -1852,6 +1854,11 @@ class Cutzo:
 
         layout = recipes.plan_episode(ep, show, voice_path=self._ep_dir(ep_id) / "voice.f32", talk_lufs=talk,
                                       kit_file=kit_file, length_of=length_of, loudness_of=loudness_of)
+        clips = self.guard.writable(self._ep_dir(ep_id) / "clips")
+        for k, p in enumerate(layout.pieces):
+            if p.effect:  # e.g. the cold open "from the television": a copy with the effect, made once
+                src, a, b = effects.clip(p.effect, p.src, p.start, p.end, clips, check=check)
+                layout.pieces[k] = dataclasses.replace(p, src=src, start=a, end=b)
         return layout, talk, kit_file
 
     SECTIONS = {"opening": "the opening", "ending": "the ending"}

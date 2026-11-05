@@ -164,6 +164,12 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
   `set_music_hit`, connector `set_music_right_away` / `add_chapter(music_right_away=)`, a tick on Review's
   chapters): the theme starts at `break.hit_start` (20.58 s, before its last stab and the band) the moment
   the talk stops, for a haiku's punchline.
+- Nov 5, evening (Nick): voices over music louder (cold open 8.5 dB, sign-off 11 dB) and the theme dips
+  8 dB (was 5) under them and under the sound bites (`Plan.voice_spans` counts bites). The Dig's cold open
+  and sign-off sound "from the television" (`recipe["clip_effect"] = "tv"`, `Piece.effect`):
+  `core/effects.py` makes a filtered, loudness-matched copy of each clip once (`<episode>/clips/`), and
+  `Cutzo._render_layout` swaps it in. The curve was measured on his Season Debrief Part 2 MP3 against the raw
+  recording (`lab\tv_measure.py`); his Premiere project only stores the effect as unnamed filters.
 - Episode folders hold `voice.f32` (cleaned talk, recording time), `original.f32`, the two
   previews, `transcript.json`, `waveform-*.json` caches and `inserts/` (extras' copies). Exports
   render `mix.f32` then delete it (video exports also use `work-export/`, deleted after).
