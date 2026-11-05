@@ -64,7 +64,8 @@ How to work:
   - "cut": Nick said "cut" on its own: he wants a music break (The Dig: theme and stinger) there. Read
     on from the mark and find where the next segment really starts (usually "All right, ..." or the
     next game or topic); cut from just after the last real sentence before "cut" up to that point
-    (the "cut", the chatter and the pause), and add_chapter at the start with a short segment title.
+    (the "cut", the chatter and the pause), and add_chapter at the start with a short segment title
+    (The New Heretics: with new_segment=true, so a music break plays there rather than a page flip).
   - "haiku": a haiku. Its punchline is the last syllable; add_chapter right after it (at the next words
     worth keeping, cutting any chatter between) with music_right_away=true, so the break music starts
     the moment the punchline lands. Tell Nick where it is so he can listen.
