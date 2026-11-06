@@ -447,3 +447,115 @@ def test_combined_recordings_play_one_after_another(tmp_path, monkeypatch):
         assert not app.set_music_hit(ep_id, chapter["id"], False)["chapter"]["music_hit"]
     finally:
         app.jobs.shutdown()
+
+
+# ------------------------------------------------------------ whine removal
+def talk_with_whine(seconds=60.0, whine=(15.0, 40.0), hz=1104.0, seed=3):
+    """'Talk' (bursts of a voice-like buzz) with pauses, a quiet room, and a steady whine in one stretch.
+    Returns the samples and the 'words' (one per burst)."""
+    rng = np.random.default_rng(seed)
+    n = int(seconds * RATE)
+    t = np.arange(n) / RATE
+    x = rng.normal(0, 0.001, n).astype(np.float32)
+    words, at = [], 0.5
+    while at + 1.2 < seconds:
+        a, b = int(at * RATE), int((at + 1.2) * RATE)
+        f0 = rng.uniform(100, 160)
+        burst = sum(np.sin(2 * np.pi * f0 * k * t[a:b]) / k for k in range(1, 12)) * 0.05
+        x[a:b] += (burst * np.hanning(b - a)).astype(np.float32)
+        words.append({"w": "word", "s": at, "e": at + 1.2})
+        at += 1.2 + rng.uniform(0.6, 1.0)
+    m = (t >= whine[0]) & (t < whine[1])
+    phase = 2 * np.pi * hz * t[m] - 2 / 0.2 * np.cos(2 * np.pi * 0.2 * t[m])  # wanders +-2 Hz, like a fan
+    x[m] += (0.006 * np.sin(phase)).astype(np.float32)
+    return x, words
+
+
+def tone_level(x, words, a, b, hz):
+    """dB of `hz` in the pauses between a and b."""
+    from cutzo.core import tones
+
+    gaps = [(g0, g1) for g0, g1 in tones.pauses(words) if g0 >= a and g1 <= b]
+    seg = np.concatenate([x[int(g0 * RATE):int(g1 * RATE)] for g0, g1 in gaps]).astype(np.float64)
+    p = np.abs(np.fft.rfft(seg * np.hanning(len(seg)))) ** 2
+    f = np.fft.rfftfreq(len(seg), 1 / RATE)
+    return 10 * np.log10(p[(f > hz - 15) & (f < hz + 15)].sum())
+
+
+@needs_ffmpeg
+def test_a_steady_whine_is_found_in_the_pauses_and_notched_out(tmp_path):
+    from cutzo.core import tones
+
+    x, words = talk_with_whine()
+    voice = audio.write_f32(tmp_path / "voice.f32", x)
+    found = tones.find(voice, words)
+    assert len(found) == 1, found
+    s = found[0]
+    assert 10 <= s["start"] <= 16 and 39 <= s["end"] <= 46, s
+    assert any(abs(t["hz"] - 1104) < 6 for t in s["tones"]) and all(t["hz"] >= tones.LO for t in s["tones"])
+
+    backups = tmp_path / "whine"
+    done = tones.remove(voice, found, backups)
+    y = np.fromfile(voice, dtype="<f4")
+    assert tone_level(y, words, 18, 38, 1104) < tone_level(x, words, 18, 38, 1104) - 20  # gone from the pauses
+    a, b = done[0]["frames"]
+    assert np.array_equal(y[:a], x[:a]) and np.array_equal(y[b:], x[b:])  # nothing else touched
+    # The talk keeps its sound: away from the notch, the bursts are as loud as before.
+    k = int(25.0 * RATE)
+    seg = slice(k, k + RATE * 5)
+    assert np.sqrt(np.mean(y[seg] ** 2)) == pytest.approx(np.sqrt(np.mean(x[seg] ** 2)), rel=0.05)
+
+    assert tones.restore(voice, backups)
+    assert np.array_equal(np.fromfile(voice, dtype="<f4"), x)  # put back exactly
+    assert not list(backups.glob("*.f32"))
+    assert tones.find(voice, words, start=45.0) == []  # nothing after the whine stops
+    assert "1,104 Hz" in tones.describe(found, lambda s: f"{s:.0f}")
+
+
+@needs_ffmpeg
+def test_whine_removal_on_an_episode_survives_a_rebuild_and_can_be_put_back(tmp_path, monkeypatch):
+    from cutzo.core import Cutzo, service
+
+    x, words = talk_with_whine(seconds=50.0, whine=(0.0, 30.0))
+    raw = audio.write_f32(tmp_path / "raw.f32", x)
+    rec = tmp_path / "Whine.wav"
+    subprocess.run([str(FFMPEG), "-hide_banner", "-loglevel", "error", "-y", "-f", "f32le", "-ar", str(RATE), "-ac", "1",
+                    "-i", str(raw), "-c:a", "pcm_s24le", str(rec)], check=True)
+    app = Cutzo(tmp_path / "library", speed=0.0, drive=tmp_path / "drive")
+    try:
+        ep_id = app.create_episode(show="The Dig", title="Fan")["episode"]["id"]
+        app.jobs.wait(app.import_media(ep_id, [str(rec)])["job"]["id"], 60)
+        app.set_voice(ep_id, 0)
+        monkeypatch.setattr(service.toolbox, "available", lambda *names: False)
+        assert app.jobs.wait(app.build_episode(ep_id)["job"]["id"], 120)["status"] == "done"
+        with pytest.raises(CutzoError):
+            app.remove_whine(ep_id)  # needs the transcript first
+        with pytest.raises(CutzoError):
+            app.remove_whine(ep_id, on=False)  # nothing to put back
+        app._save_transcript(ep_id, {"words": words})
+        ep_dir = app._ep_dir(ep_id)
+        built = np.fromfile(ep_dir / "voice.f32", dtype="<f4")
+        stamp = (ep_dir / "preview.m4a").stat().st_mtime_ns
+
+        job = app.jobs.wait(app.remove_whine(ep_id, source="claude")["job"]["id"], 120)
+        assert job["status"] == "done", job.get("error")
+        assert "Took a steady whine out" in job["result"]["summary"] and "1,10" in job["result"]["summary"]
+        ep = app.get_episode(ep_id)
+        assert ep["whine"]["stretches"][0]["start"] == 0 and ep["whine"]["by"] == "claude"
+        cleaned = np.fromfile(ep_dir / "voice.f32", dtype="<f4")
+        assert tone_level(cleaned, words, 2, 28, 1104) < tone_level(built, words, 2, 28, 1104) - 20
+        assert (ep_dir / "preview.m4a").stat().st_mtime_ns != stamp  # the player hears it too
+
+        # A rebuild makes new voices from the recording and takes the whine out of them again.
+        assert app.jobs.wait(app.build_episode(ep_id)["job"]["id"], 120)["status"] == "done"
+        app._save_transcript(ep_id, {"words": words})
+        again = np.fromfile(ep_dir / "voice.f32", dtype="<f4")
+        assert tone_level(again, words, 2, 28, 1104) < tone_level(built, words, 2, 28, 1104) - 20
+
+        job = app.jobs.wait(app.remove_whine(ep_id, on=False)["job"]["id"], 120)
+        assert job["status"] == "done" and "Put back" in job["result"]["summary"]
+        assert np.allclose(np.fromfile(ep_dir / "voice.f32", dtype="<f4"), built, atol=1e-6)
+        assert app.get_episode(ep_id)["whine"] is None
+        assert any(a["action"] == "remove_whine" for a in app.activity.recent(limit=20))
+    finally:
+        app.jobs.shutdown()

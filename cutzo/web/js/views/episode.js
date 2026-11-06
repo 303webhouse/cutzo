@@ -2,7 +2,7 @@
 // Show kit and Export.
 
 import { api, epPath } from "../api.js";
-import { h, add, clear, icons, fmtDur, fmtSize, plural, toast, toastError, confirmDialog, showColor, relTime } from "../ui.js";
+import { h, add, clear, icons, fmtDur, fmtTime, fmtSize, plural, toast, toastError, confirmDialog, showColor, relTime } from "../ui.js";
 import { nextAction, statusWord } from "./episodes.js";
 import { mountReview } from "./review.js";
 
@@ -293,6 +293,7 @@ export async function render(main, params, ctx) {
           built() ? h("p", { class: "small muted" }, "Building again replaces Cutzo's suggestions. Your own cuts and chapters, and Claude's, stay.") : null,
           ep.sample ? h("p", { class: "small muted" }, "Sample episode: these steps are pretend and use a short test clip.") : null,
           ep.voice_settings ? cleanupControl() : null,
+          ep.voice_settings && built() ? whineControl() : null,
           h("div", { class: "row" },
             h("button", { class: "btn btn-primary", disabled: !media.length || (ep.busy || []).length > 0, onclick: build }, built() ? "Build again" : "Build episode"),
             needsTranscript() ? h("button", { class: "btn", disabled: (ep.busy || []).length > 0, onclick: transcribe }, "Just transcribe") : null),
@@ -578,6 +579,23 @@ export async function render(main, params, ctx) {
       h("span", {}, "Cleanup strength: ", out, " of 100"),
       slider,
       h("span", { class: "hint" }, "How far background noise is turned down. 25 is the light setting you picked in the listening test. Build again to hear a change."));
+  }
+
+  function whineControl() {
+    const busy = (ep.busy || []).length > 0;
+    const stretches = (ep.whine && ep.whine.stretches) || [];
+    const run = (on) => act(() => api(epPath(ep.id) + "/whine", { method: "POST", body: { on } }),
+      on ? "Listening for a whine. Progress shows on the left." : "Putting the background back. Progress shows on the left.");
+    const found = stretches.map((s) => `${fmtTime(s.start)} to ${fmtTime(s.end)} (${s.tones.map((t) => `${Math.round(t.hz).toLocaleString()} Hz`).join(", ")})`);
+    return h("div", { class: "field", style: { marginTop: "12px" } },
+      h("span", {}, "Whine or whirr in the background"),
+      stretches.length
+        ? h("span", { class: "hint" }, "Taken out: ", found.join("; "), ". Rebuilding keeps it out.")
+        : h("span", { class: "hint" }, "Noise removal leaves steady tones (a fan, a computer) in. Cutzo can find them in the pauses and take out just those, without a rebuild."),
+      h("div", { class: "row" },
+        h("button", { class: "btn btn-small", disabled: busy || !ep.has_transcript, onclick: () => run(true) },
+          stretches.length ? "Look again" : "Find and remove a whine"),
+        stretches.length ? h("button", { class: "btn btn-small", disabled: busy, onclick: () => run(false) }, "Put it back") : null));
   }
 
   drawHead();

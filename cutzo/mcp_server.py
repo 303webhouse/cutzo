@@ -179,6 +179,11 @@ def _ep(episode: str) -> str:
     return "/api/episodes/" + urllib.parse.quote(str(episode).strip(), safe="")
 
 
+def _mmss(seconds: float) -> str:
+    s = int(seconds)
+    return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
+
+
 def _job_brief(job: dict[str, Any]) -> dict[str, Any]:
     return {k: job.get(k) for k in ("id", "title", "status", "step", "progress", "error") if job.get(k) is not None}
 
@@ -280,6 +285,9 @@ def get_episode(
         "chapter_list_file": (e.get("extras") or {}).get("chapters_file"),
         "voice_cleanup": ({"strength": e["voice_settings"]["strength"], "steps": (e.get("voice") or {}).get("steps")}
                           if e.get("voice_settings") else None),
+        "whine_taken_out": ([{"from": _mmss(w["start"]), "to": _mmss(w["end"]),
+                              "pitch_hz": [t["hz"] for t in w["tones"]]} for w in e["whine"]["stretches"]]
+                            if e.get("whine") else None),
         "dead_air": ({"silences_longer_than": e["dead_air"]["longer_than"], "shrink_to": e["dead_air"]["keep"]}
                      if e.get("dead_air") else None),
         "cold_open": [{"id": p["id"], "from": p["start_text"], "to": p["end_text"]}
@@ -659,6 +667,22 @@ def set_voice_strength(
     (build_episode)."""
     res = engine.call("POST", _ep(episode) + "/voice", {"strength": strength})
     return {"done": res["summary"], "rebuild_needed": res["needs_rebuild"]}
+
+
+@server.tool(annotations=CHANGE, structured_output=False)
+def remove_whine(
+    episode: Episode,
+    start: Annotated[str | float | None, Field(description="Optional: only look from this recording time, e.g. '2:00'.")] = None,
+    end: Annotated[str | float | None, Field(description="Optional: only look up to this recording time.")] = None,
+    put_back: Annotated[bool, Field(description="True to undo: put the background back exactly as it was.")] = False,
+) -> dict[str, Any]:
+    """Take a steady whine, whirr or electrical tone out of the cleaned voices (the noise removal leaves steady
+    tones in). Cutzo listens to the pauses between words, finds narrow tones standing out of the background
+    and notches just those out where they are; voices are untouched. No rebuild needed, and a rebuild keeps it.
+    Steady hum below 200 Hz isn't touched (it sits among voices' own pitch). Returns a job id (about a minute);
+    job_status then says where it found a whine and at what pitch."""
+    res = engine.call("POST", _ep(episode) + "/whine", {"on": not put_back, "start": start, "end": end})
+    return {"job": _job_brief(res["job"]), "note": res.get("note")}
 
 
 @server.tool(annotations=READ, structured_output=False)

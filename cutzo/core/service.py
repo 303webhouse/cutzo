@@ -33,6 +33,7 @@ from . import video as videolib
 from . import build as buildlib
 from . import shows as showlib
 from . import teaser as teaserlib
+from . import tones as tonelib
 from . import transcript as tx
 from .activity import ActivityLog
 from .errors import CutzoError, NeedsConfirmation, NotAllowed, NotFound
@@ -621,8 +622,15 @@ class Cutzo:
             report = reporter("voice", "Podcast voice")
             report(0.0, STAGE_DETAIL["voice"])
             _, _, total = buildlib.build_voice(ep_dir, sources, settings, check=ctx.check, report=report)
-            for cache in ep_dir.glob("waveform*.json"):
-                cache.unlink()
+            for cache in [*ep_dir.glob("waveform*.json"), *ep_dir.glob("section-*.m4a"), *ep_dir.glob("clips/*.f32")]:
+                cache.unlink()  # made from the old voice.f32
+            whine = (self._load(ep_id).get("whine") or {}).get("stretches")
+            backups = self.guard.writable(ep_dir / "whine")
+            tonelib.forget(backups)  # the copies were of the old voice.f32
+            if whine:  # taken out before: take it out of the new voices too
+                report(0.94, "Taking the whine out again")
+                tonelib.remove(ep_dir / "voice.f32", whine, backups, check=ctx.check)
+                buildlib.preview(ep_dir / "voice.f32", ep_dir / "preview.m4a", check=ctx.check)
             with self._lock:
                 ep = self._load(ep_id)
                 ep["duration"] = total
@@ -812,6 +820,95 @@ class Cutzo:
         summary = f"Voice cleanup strength set to {value} of 100" + (" (rebuild to hear it)" if ep.get("needs_rebuild") else "")
         self._log(source, "set_voice", f"{summary} in {_q(ep['title'], 40)}", ep_id)
         return {"summary": summary, "needs_rebuild": bool(ep.get("needs_rebuild"))}
+
+    def remove_whine(self, episode: str, on: bool = True, start: Any = None, end: Any = None,
+                     source: str = "you") -> dict[str, Any]:
+        """Find steady tones (a fan, a computer's whine) in the pauses and notch them out of the cleaned
+        voices, or with on=False put the sound back as it was. Returns a job id (about a minute)."""
+        ep_id = self.resolve_episode(episode)
+        ep = self._load(ep_id)
+        if ep.get("sample"):
+            raise CutzoError("Whine removal works on real episodes; sample episodes are pretend.")
+        if not (self._ep_dir(ep_id) / "voice.f32").exists() or not ep.get("duration"):
+            raise CutzoError("Build the episode first; the whine is taken out of its cleaned voices.")
+        if on and not self._transcript(ep_id).get("words"):
+            raise CutzoError("Cutzo listens for the whine in the pauses between words, so it needs the transcript first.",
+                             hint="Transcribe the episode, then try again.")
+        a = parse_time(start, name="start") if start not in (None, "") else None
+        b = parse_time(end, name="end") if end not in (None, "") else None
+        if a is not None and b is not None and b <= a:
+            raise CutzoError("The end must be after the start.")
+        if not on and not (ep.get("whine") or {}).get("stretches"):
+            raise CutzoError("No whine has been taken out of this episode, so there's nothing to put back.")
+        toolbox.require("ffmpeg")
+        with self._lock:
+            self._refuse_if_busy(ep_id, "whine")
+            job = self.jobs.submit(kind="whine", title=("Remove the whine in " if on else "Put back the sound of ")
+                                   + ep["title"], episode=ep_id, source=source, steps=["Whine removal"],
+                                   work=self._whine_work(ep_id, on, a, b, source))
+        self._log(source, "remove_whine", ("Started looking for a whine in " if on else "Started putting back the sound of ")
+                  + _q(ep["title"], 40), ep_id, details={"job": job["id"]})
+        return {"job": job, "note": "Listens to the pauses, notches out steady tones and remakes the listening copy; "
+                                    "about a minute."}
+
+    def _whine_work(self, ep_id: str, on: bool, a: float | None, b: float | None, source: str):
+        def work(ctx: JobContext) -> dict[str, Any]:
+            label = "Whine removal"
+            ep_dir = self._ep_dir(ep_id)
+            voice = self.guard.writable(ep_dir / "voice.f32")
+            backups = self.guard.writable(ep_dir / "whine")
+            before = list((self._load(ep_id).get("whine") or {}).get("stretches") or [])
+            ctx.step(label, 0.0, "Putting back the sound from before")
+            tonelib.restore(voice, backups)
+            found: list[dict[str, Any]] = []
+            if on:
+                ctx.step(label, 0.05, "Listening for steady tones in the pauses")
+                found = tonelib.find(voice, self._transcript(ep_id).get("words") or [], start=a, end=b, check=ctx.check)
+                if found:
+                    ctx.step(label, 0.3, "Taking the whine out")
+                    found = tonelib.remove(voice, found, backups, check=ctx.check)
+            self._voice_changed(ep_id, before + found, ctx, label, 0.4)
+            with self._lock:
+                ep = self._load(ep_id)
+                if found:
+                    ep["whine"] = {"stretches": [{k: s[k] for k in ("start", "end", "tones")} for s in found],
+                                   "by": source, "at": now_iso()}
+                else:
+                    ep.pop("whine", None)
+                self._save(ep)
+            where = tonelib.describe(found, fmt_time)
+            if on and found:
+                summary = f"Took a steady whine out of {_q(ep['title'], 40)}: {where}"
+            elif on:
+                summary = (f"No steady whine found in {_q(ep['title'], 40)}"
+                           + (" (the one taken out before is back)" if before else ""))
+            else:
+                summary = f"Put back the original background in {_q(ep['title'], 40)}"
+            self._log(source, "remove_whine", summary, ep_id)
+            return {"summary": summary, "stretches": found}
+        return work
+
+    def _voice_changed(self, ep_id: str, stretches: list[dict[str, Any]], ctx: JobContext, label: str,
+                       base: float) -> None:
+        """voice.f32 changed in these stretches: drop what was made from it there, remake the listening copy."""
+        ep_dir = self._ep_dir(ep_id)
+        for cache in ep_dir.glob("waveform*.json"):
+            self.guard.writable(cache).unlink()
+        for f in ep_dir.glob("section-*.m4a"):
+            self.guard.writable(f).unlink()
+        clips = ep_dir / "clips"
+        if clips.exists():
+            for f in clips.glob("*.f32"):
+                try:
+                    _, s_ms, e_ms = f.stem.split("-")[:3]
+                    s, e = int(s_ms) / 1000, int(e_ms) / 1000
+                except ValueError:
+                    continue
+                if any(s < st["end"] + tonelib.PAD and e > st["start"] - tonelib.PAD for st in stretches):
+                    self.guard.writable(f).unlink()
+        ctx.step(label, base, "Remaking the listening copy")
+        buildlib.preview(ep_dir / "voice.f32", self.guard.writable(ep_dir / "preview.m4a"), check=ctx.check,
+                         report=lambda p: ctx.step(label, base + (0.98 - base) * p, "Remaking the listening copy"))
 
     # ========================================================== transcript
     def get_transcript(self, episode: str, include_cut: bool = False, fmt: str = "text",
@@ -2453,7 +2550,7 @@ class Cutzo:
         if busy:
             job = busy[0]
             doing = {"build": "building", "export": "exporting", "import": "importing",
-                     "transcribe": "transcribing"}.get(job["kind"], "working on")
+                     "transcribe": "transcribing", "whine": "taking a whine out of"}.get(job["kind"], "working on")
             raise CutzoError(f"Cutzo is still {doing} this episode (job {job['id']}). Try again when it finishes.",
                              data={"job": job["id"]})
 
@@ -2762,6 +2859,7 @@ class Cutzo:
             "exports": ep.get("exports", []),
             "extras": ep.get("extras"),
             "teaser": ep.get("teaser"),
+            "whine": ep.get("whine"),
             "sign_off_after": self._sign_off_after(ep, show),
             "marks": self._marks(ep),
             "has_transcript": bool(self._transcript(ep["id"]).get("words")),

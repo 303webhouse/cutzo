@@ -151,6 +151,12 @@ class SectionBody(BaseModel):
     which: str
 
 
+class WhineBody(BaseModel):
+    on: bool = True
+    start: float | str | None = None
+    end: float | str | None = None
+
+
 class SignOffBody(BaseModel):
     after_talk: float
 
@@ -286,6 +292,10 @@ def create_app(cutzo: Cutzo, *, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     def section_audio(episode: str, which: str = "ending"):
         return FileResponse(cutzo.section_audio(episode, which), media_type="audio/mp4",
                             headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/episodes/{episode}/whine")
+    def whine(episode: str, body: WhineBody, request: Request):
+        return cutzo.remove_whine(episode, body.on, body.start, body.end, source=source_of(request))
 
     @app.post("/api/episodes/{episode}/sign-off-timing")
     def sign_off_timing(episode: str, body: SignOffBody, request: Request):
