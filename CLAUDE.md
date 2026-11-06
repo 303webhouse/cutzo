@@ -151,7 +151,7 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
   (route `/section-preview`, played via `/section-audio`). "breaks" (Nov 5) plays every music break one
   after another, 8 s of talk before and 12 s after each (`_break_windows`: break music and stinger pieces).
   `set_sign_off_timing` (`ep["sign_off_after"]`,
-  The Dig's default 3 s) moves the cold out against the ending music; both sit under the picks on Review.
+  The Dig's default 15 s since Nov 5, was 3) moves the cold out against the ending music; both sit under the picks on Review.
 - Nov 5 (Nick, before recording a Dig): (1) an "um"/"uh" cut on its own keeps its space: `cut_words` and
   word selections made only of fillers (`captions.FILLERS`) become `type: "mute"` edits (reason "filler
   word"): not in `_cuts`/the timeline, silent in `render.conversation(mutes=...)` (pieces split with
@@ -166,8 +166,8 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
   `set_music_hit`, connector `set_music_right_away` / `add_chapter(music_right_away=)`, a tick on Review's
   chapters): the theme starts at `break.hit_start` (20.58 s, before its last stab and the band) the moment
   the talk stops, for a haiku's punchline.
-- Nov 5, evening (Nick): voices over music louder (cold open 8.5 dB, sign-off 11 dB) and the theme dips
-  8 dB (was 5) under them and under the sound bites (`Plan.voice_spans` counts bites). The Dig's cold open
+- Nov 5, evening (Nick): voices over music louder (cold open 8.5 dB, sign-off 11 dB; later that evening a tad
+  softer again: 7.0 and 9.5, with the dip 6.5 dB) and the theme dips 8 dB (was 5) under them and under the sound bites (`Plan.voice_spans` counts bites). The Dig's cold open
   and sign-off sound "from the television" (`recipe["clip_effect"] = "tv"`, `Piece.effect`):
   `core/effects.py` makes a filtered, loudness-matched copy of each clip once (`<episode>/clips/`), and
   `Cutzo._render_layout` swaps it in. The curve was measured on his Season Debrief Part 2 MP3 against the raw

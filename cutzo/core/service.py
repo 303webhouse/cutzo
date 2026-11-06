@@ -2051,7 +2051,7 @@ class Cutzo:
         return path
 
     def set_sign_off_timing(self, episode: str, after_talk: Any, source: str = "you") -> dict[str, Any]:
-        """When the sign-off clips start, in seconds after the last words of the talk (The Dig: 3 s unless
+        """When the sign-off clips start, in seconds after the last words of the talk (The Dig: 15 s unless
         set). Lets Nick land a clip on a moment in the ending music."""
         try:
             value = round(float(after_talk), 2)

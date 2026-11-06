@@ -521,14 +521,15 @@ def test_real_build_review_and_export(real_episode):
     app.undo(ep_id)
     with pytest.raises(CutzoError):
         app.section_preview(ep_id, "middle")
-    assert app.get_episode(ep_id)["sign_off_after"] == 3.0
-    longer = app.set_sign_off_timing(ep_id, 8)
-    assert longer["after_talk"] == 8 and app.get_episode(ep_id)["sign_off_after"] == 8
-    assert app.section_preview(ep_id, "ending")["to"] == pytest.approx(ending["to"] + 5, abs=0.05)
+    default = recipes.THE_DIG["outro"]["clips_after"]
+    assert app.get_episode(ep_id)["sign_off_after"] == default == 15.0
+    longer = app.set_sign_off_timing(ep_id, 20)
+    assert longer["after_talk"] == 20 and app.get_episode(ep_id)["sign_off_after"] == 20
+    assert app.section_preview(ep_id, "ending")["to"] == pytest.approx(ending["to"] + 20 - default, abs=0.05)
     with pytest.raises(CutzoError):
         app.set_sign_off_timing(ep_id, 60)
     app.undo(ep_id)
-    assert app.get_episode(ep_id)["sign_off_after"] == 3.0
+    assert app.get_episode(ep_id)["sign_off_after"] == default
 
     with pytest.raises(CutzoError):
         app.export(ep_id, ["youtube-4k"])  # video is Phase 3
@@ -706,6 +707,6 @@ def test_dig_clips_sound_like_tv_and_music_dips_under_voices_and_bites():
                                 kit_file=lambda a: Path(a), length_of=lambda a: 1e9)
     effects = {p.label: p.effect for p in plan.pieces}
     assert effects["Cold open"] == effects["Sign-off"] == "tv" and effects["Conversation"] == ""
-    assert plan.duck_db == 8.0
+    assert plan.duck_db == 6.5
     bites = [p for p in plan.pieces if p.label == "Sound bite"]
     assert any(a <= bites[0].at and bites[0].until <= b for a, b in plan.voice_spans())

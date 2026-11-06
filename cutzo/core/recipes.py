@@ -48,7 +48,7 @@ EXTRA_VIDEO_FADE = 0.3  # a video extra dissolves in and out over this long
 THE_DIG: dict[str, Any] = {
     "intro": {
         "cold_open_at": 0.5,
-        "cold_open_gain_db": 8.5,  # Premiere had 4.0; Nick (Nov 5): voices over the music a bit louder
+        "cold_open_gain_db": 7.0,  # Premiere had 4.0; Nick (Nov 5): louder (8.5), then a tad softer (7.0)
         # Where Nick's cold open ended, just before the full band comes in (about 21 s into the theme). A shorter
         # cold open leaves the music where it is; a longer one moves the theme, bites and talk later by as much,
         # so the band still comes in after it.
@@ -88,13 +88,15 @@ THE_DIG: dict[str, Any] = {
     "outro": {
         "lead_in": 18.0,
         "theme_gain_db": -2.55,  # Premiere had 0.45
-        "clips_after": 3.0,  # sign-off clips start this long after the talking ends
-        "clips_gain_db": 11.0,  # Premiere had 6.5; Nick (Nov 5): voices over the music a bit louder
+        "clips_after": 15.0,  # sign-off clips start this long after the talking ends (3 until Nick, Nov 5: the music
+        # plays on its own a while first; the clip is a bonus for listeners who stay after the closing music starts)
+        "clips_gain_db": 9.5,  # Premiere had 6.5; Nick (Nov 5): louder (11.0), then a tad softer (9.5)
         "tail": 7.2,  # theme keeps playing this long after the last clip
         "fade_out": 10.0,
         "no_clips_tail": 20.0,
     },
-    "duck_db": 8.0,  # the theme dips this much while someone talks (or a sound bite plays) over it; 5 until Nov 5
+    "duck_db": 6.5,  # the theme dips this much while someone talks (or a sound bite plays) over it; 5, then 8, then
+    # 6.5 (Nick, Nov 5 evening: the music a tad louder under the TV clips)
     # The cold open and sign-off clips sound like they come from a TV (Nick's "From the television" preset in
     # Premiere): it tells the listener they're a preview or a bonus, not the show itself.
     "clip_effect": "tv",
