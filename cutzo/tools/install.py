@@ -16,6 +16,7 @@ import os
 import shutil
 import stat
 import sys
+import tarfile
 import tempfile
 import urllib.request
 import zipfile
@@ -23,14 +24,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from . import TOOLS, Tool, installed_path, platform_key, tools_dir
+from . import RETIRED, TOOLS, Tool, installed_file, installed_path, platform_key, tools_dir
 
 MARKER = ".cutzo-tool.json"
 CHUNK = 1 << 20
 
 
 def is_installed(tool: Tool) -> bool:
-    return all(installed_path(p).is_file() for p in tool.programs)
+    return all(installed_path(p).is_file() for p in tool.programs) and all(installed_file(f).is_file() for f in tool.files)
 
 
 def _download(url: str, dest: Path, expected_size: int, report: Callable[[str], None]) -> str:
@@ -74,6 +75,41 @@ def _unzip(archive: Path, inner: str | None, dest: Path) -> None:
                 shutil.copyfileobj(src, out, CHUNK)
 
 
+def _untar(archive: Path, inner: str | None, dest: Path) -> None:
+    """Unpack a .tar.gz the same careful way as _unzip (no paths outside `dest`, no odd entries)."""
+    prefix = (inner.strip("/") + "/") if inner else ""
+    root = dest.resolve()
+    with tarfile.open(archive, "r:gz") as tf:
+        for member in tf.getmembers():
+            name = member.name.replace("\\", "/").lstrip("./")
+            if prefix and not name.startswith(prefix):
+                continue
+            rel = name[len(prefix):]
+            if not rel or member.isdir():
+                continue
+            target = (dest / rel).resolve()
+            if root not in target.parents:
+                raise RuntimeError(f"The download contains an unsafe path ({member.name}); not using it.")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if member.issym():
+                link = (target.parent / member.linkname).resolve()
+                if root not in link.parents:
+                    raise RuntimeError(f"The download contains an unsafe link ({member.name}); not using it.")
+                if target.exists() or target.is_symlink():
+                    target.unlink()
+                target.symlink_to(member.linkname)
+                continue
+            if not member.isfile():
+                continue
+            src = tf.extractfile(member)
+            if src is None:
+                continue
+            with src, open(target, "wb") as out:
+                shutil.copyfileobj(src, out, CHUNK)
+            if member.mode & 0o111:
+                _make_runnable(target)
+
+
 def _make_runnable(path: Path) -> None:
     if os.name != "nt":
         path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -99,6 +135,13 @@ def install(tool: Tool, report: Callable[[str], None] = print) -> Path:
                 raise RuntimeError("the download didn't match its checksum, so Cutzo didn't use it; try again later")
             if download.kind == "zip":
                 _unzip(file, download.inner, partial)
+            elif download.kind == "tar.gz":
+                _untar(file, download.inner, partial)
+            elif download.kind == "file":
+                (rel,) = tool.files.values()
+                target = partial / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(file), target)
             else:
                 (rel,) = tool.programs.values()
                 target = partial / (rel + (".exe" if os.name == "nt" else ""))
@@ -109,6 +152,9 @@ def install(tool: Tool, report: Callable[[str], None] = print) -> Path:
             if not program.is_file():
                 raise RuntimeError(f"the download didn't contain {program.name}")
             _make_runnable(program)
+        for rel in tool.files.values():
+            if not (partial / rel).is_file():
+                raise RuntimeError(f"the download didn't contain {Path(rel).name}")
         _write_marker(partial, tool, download.sha256)
         if final.exists():
             shutil.rmtree(final)
@@ -146,6 +192,26 @@ def remove_old_versions(tool: Tool) -> list[str]:
     return removed
 
 
+def remove_retired() -> list[str]:
+    """Delete Cutzo's own copies of tools it no longer uses (see RETIRED), to give the space back."""
+    removed = []
+    root = tools_dir()
+    if not root.is_dir():
+        return removed
+    for folder in root.iterdir():
+        marker = folder / MARKER
+        if not folder.is_dir() or not marker.is_file():
+            continue
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if data.get("tool") in RETIRED:
+            shutil.rmtree(folder, ignore_errors=True)
+            removed.append(folder.name)
+    return removed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m cutzo.tools.install", description=__doc__)
     parser.add_argument("--check", action="store_true", help="only report, don't download")
@@ -165,7 +231,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"   {tool.label} {tool.version} isn't installed yet.", flush=True)
             problems += 1
             continue
-        print(f"   Downloading {tool.label} {tool.version}...", flush=True)
+        if platform_key() not in tool.downloads and not tool.programs:
+            print(f"   {tool.label} isn't downloaded on this kind of computer ({platform_key()}); skipped.", flush=True)
+            continue
+        size = tool.downloads[platform_key()].size if platform_key() in tool.downloads else 0
+        print(f"   Downloading {tool.label} {tool.version}" + (f" ({size / 1e9:.1f} GB, once)" if size > 3e8 else "") + "...",
+              flush=True)
         try:
             install(tool, report=lambda text: print(f"      {text}", flush=True))
         except Exception as exc:  # report every failure in plain words, keep going
@@ -174,6 +245,10 @@ def main(argv: list[str] | None = None) -> int:
             continue
         old = remove_old_versions(tool)
         print(f"   {tool.label} {tool.version} is ready." + (f" Removed {', '.join(old)}." if old else ""), flush=True)
+    if not args.check and not args.only:
+        gone = remove_retired()
+        if gone:
+            print(f"   Removed tools Cutzo no longer uses: {', '.join(gone)}.", flush=True)
     return 1 if problems else 0
 
 

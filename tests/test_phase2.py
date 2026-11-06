@@ -60,12 +60,28 @@ def test_modules_import_on_their_own():
 def test_tool_registry_and_status():
     assert tools.platform_key().count("-") == 1
     names = {t["tool"] for t in tools.status()}
-    assert names == {"ffmpeg", "deep-filter"}
+    assert names == {"ffmpeg", "deep-filter", "whisper", "parakeet-model"}
+    assert not set(tools.RETIRED) & names
     for tool in tools.TOOLS.values():
         for d in tool.downloads.values():
-            assert len(d.sha256) == 64 and d.url.startswith("https://github.com/")
+            assert len(d.sha256) == 64 and d.size > 0
+            assert d.url.startswith(("https://github.com/", "https://huggingface.co/ggml-org/parakeet-GGUF/resolve/3515645"))
+            assert d.kind in ("zip", "tar.gz", "exe", "file")
     with pytest.raises(KeyError):
         tools.find("photoshop")
+
+
+def test_speech_model_can_come_from_an_environment_variable(monkeypatch, tmp_path):
+    monkeypatch.setenv("CUTZO_TOOLS", str(tmp_path / "tools"))
+    monkeypatch.delenv("CUTZO_PARAKEET_MODEL", raising=False)
+    assert tools.find_file("parakeet-model") is None
+    with pytest.raises(CutzoError) as err:
+        tools.require_file("parakeet-model")
+    assert "Update Cutzo" in (err.value.hint or "")
+    model = tmp_path / "model.bin"
+    model.write_bytes(b"x")
+    monkeypatch.setenv("CUTZO_PARAKEET_MODEL", str(model))
+    assert tools.find_file("parakeet-model") == model and tools.available("parakeet-model")
 
 
 def test_require_explains_how_to_install(monkeypatch, tmp_path):
@@ -231,6 +247,55 @@ def test_dig_layout_matches_season_debrief_part_2():
     assert plan.duck_db == recipes.THE_DIG["duck_db"] > 0  # music dips under voices (Nick, Oct 14)
 
 
+def test_dig_music_stays_on_its_cue_and_breaks_use_different_parts():
+    from cutzo.core import shows
+
+    show = shows.get_show("the-dig")
+
+    def plan_for(cold):
+        ep = _ep(chapters=(0, 200, 400, 600), cold=cold)
+        return recipes.plan_episode(ep, show, voice_path=Path("v.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
+                                    kit_file=lambda a: Path(a), length_of=lambda a: 1e9)
+
+    def first(plan, label):
+        return [p for p in plan.pieces if p.label == label][0]
+
+    nick, short, long = plan_for(((500, 518.65),)), plan_for(((500, 510),)), plan_for(((500, 530),))
+    # A shorter cold open leaves the theme, the bites and the talk where Nick put them (the band at ~21 s)...
+    for label in ("Theme (intro)", "Sound bite"):
+        assert first(short, label).at == pytest.approx(first(nick, label).at)
+    assert short.talk_start == pytest.approx(nick.talk_start)
+    # ...and a longer one moves all of it later by as much, so the band still comes in after it.
+    for label in ("Theme (intro)", "Sound bite"):
+        assert first(long, label).at == pytest.approx(first(nick, label).at + 11.35, abs=0.05)
+    assert recipes.THE_DIG["intro"]["cold_open_room"] == pytest.approx(
+        recipes.THE_DIG["intro"]["cold_open_end"] - recipes.THE_DIG["intro"]["cold_open_at"])
+    # Three breaks, three different parts of the song.
+    starts = [p.start for p in nick.pieces if p.label == "Theme (break)"]
+    assert starts == recipes.THE_DIG["break"]["theme_starts"][:3] and len(set(starts)) == 3
+
+
+def test_dig_extras_play_between_the_theme_and_the_stinger():
+    from cutzo.core import shows
+
+    show = shows.get_show("the-dig")
+    ep = _ep(chapters=(0, 200, 400))
+    ep["chapters"] = [{"id": f"c{n}", **c} for n, c in enumerate(ep["chapters"])]
+    plain = recipes.plan_episode(ep, show, voice_path=Path("v.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
+                                 kit_file=lambda a: Path(a), length_of=lambda a: 1e9)
+    ep["inserts"] = [{"id": "i1", "file": "drop.wav", "chapter": "c1", "time": 200, "kind": "voice", "seconds": 5.0},
+                     {"id": "i2", "file": "clip.mp4", "time": 300.0, "kind": "video", "seconds": 7.0}]
+    plan = recipes.plan_episode(ep, show, voice_path=Path("v.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
+                                kit_file=lambda a: Path(a), length_of=lambda a: 1e9)
+    drop, clip = sorted((p for p in plan.pieces if p.label == "Extra"), key=lambda p: p.at)
+    theme = [p for p in plan.pieces if p.label == "Theme (break)"][0]
+    stinger = [p for p in plan.pieces if p.label == "Stinger"][0]
+    assert drop.at == pytest.approx(theme.at + recipes.THE_DIG["break"]["lead_in"] + recipes.THE_DIG["break"]["alone"])
+    assert stinger.at == pytest.approx(drop.until + recipes.EXTRA_BREATH)
+    assert clip.length == 7.0 and plan.picture is None  # The Dig is audio only: a video extra plays its sound
+    assert plan.total - plain.total == pytest.approx(5.0 + recipes.EXTRA_BREATH + 7.0)
+
+
 def test_music_dips_while_someone_talks(tmp_path):
     music = audio.write_f32(tmp_path / "music.f32", np.full((RATE * 10, 2), 0.5, dtype=np.float32))
     silent = audio.write_f32(tmp_path / "voice.f32", np.zeros(RATE * 10, dtype=np.float32))
@@ -290,6 +355,27 @@ def test_encode_keeps_peaks_under_the_limiter_ceiling(tmp_path):
     assert render.check_file(dst, spec)["loudness"]["true_peak"] < -3.0
 
 
+@needs_ffmpeg
+def test_encode_lands_on_the_loudness_target_even_when_the_limiter_works_hard(tmp_path):
+    """The limiter takes loudness away from peaky sound; the gain is corrected before encoding,
+    so one encode is enough (Spooky Sode's first 14-minute AAC encode missed and had to be redone)."""
+    from cutzo.core import presets
+
+    spec = presets.get_preset("youtube-1080p")["spec"]
+    rng = np.random.default_rng(3)
+    t = np.arange(RATE * 12) / RATE
+    x = 0.05 * np.sin(2 * np.pi * 150 * t) * (np.sin(2 * np.pi * 2 * t) > 0) + 0.02 * rng.normal(size=len(t))
+    x[:: RATE // 10] += 0.95  # sharp clicks far above the loudness
+    mix = audio.write_f32(tmp_path / "mix.f32", np.stack([x, x], 1).astype(np.float32))
+    dst = tmp_path / "out.m4a"
+    made = render.encode(mix, dst, spec, tags={"title": "t"}, chapters=[], total=12.0)
+    plain = spec["loudness"] - made["before"]["integrated"]
+    assert made["gain_db"] > plain + 2.0  # the limiter's loss was made up
+    checked = render.check_file(dst, spec)
+    assert abs(checked["loudness"]["integrated"] - spec["loudness"]) <= 0.2
+    assert checked["loudness"]["true_peak"] <= spec["true_peak_max"]
+
+
 # ------------------------------------------------------------- kit copies
 @needs_ffmpeg
 def test_kit_local_copy_refreshes_when_drive_changes(tmp_path):
@@ -345,8 +431,37 @@ def test_real_build_review_and_export(real_episode):
     ep = app.get_episode(ep_id)
     stages = {s["key"]: s["status"] for s in ep["stages"]}
     assert stages["transcribe"] == "later" and stages["auto_edit"] == "done" and ep["stage"] == "review"
+    # Pauses of 1-3 s stay (Nick, Nov 5): none of these gaps is longer than 3 s.
+    assert not [e for e in ep["edits"] if e["reason"] in ("dead air", "pause near cut")]
+    assert ep["dead_air"]["longer_than"] == 3.0 and ep["dead_air"]["keep"] == 1.0
+    stored = app._load(ep_id)["dead_air"]["pauses"]
+    assert len(stored) == 12  # the 1.6, 2.5 and 3.0 s gaps, four times over
+
+    # ...except next to a cut or right before a break: those shrink to half a second.
+    a, b = stored[1]
+    cut = app.cut_section(ep_id, b + 0.05, b + 1.0)["edit"]
+    near = [e for e in app.get_episode(ep_id)["edits"] if e["reason"] == "pause near cut"]
+    assert len(near) == 1 and near[0]["start"] == pytest.approx(a + 0.25) and near[0]["end"] == pytest.approx(b - 0.25)
+    app.restore_cut(ep_id, cut["id"])
+    assert not [e for e in app.get_episode(ep_id)["edits"] if e["reason"] == "pause near cut"]
+    a2, b2 = stored[4]
+    opening = app.add_chapter(ep_id, 0, "Opening")["chapter"]  # the first chapter has no break before it
+    assert not [e for e in app.get_episode(ep_id)["edits"] if e["reason"] == "pause near cut"]
+    chapter = app.add_chapter(ep_id, b2 + 0.1, "After the pause")["chapter"]
+    near = [e for e in app.get_episode(ep_id)["edits"] if e["reason"] == "pause near cut"]
+    assert len(near) == 1 and near[0]["text"].endswith("before a break")
+    app.restore_cut(ep_id, near[0]["id"])  # brought back: stays back
+    assert not [e for e in app.get_episode(ep_id)["edits"] if e["reason"] == "pause near cut"]
+    app.remove_chapter(ep_id, chapter["id"])
+    app.remove_chapter(ep_id, opening["id"])
+    raw = app._load(ep_id)
+    raw["dismissed"] = []  # start the older checks below from a clean slate
+    app._save(raw)
+
+    app.set_dead_air(ep_id, longer_than=1.0, keep=0.5)
+    ep = app.get_episode(ep_id)
     dead = [e for e in ep["edits"] if e["reason"] == "dead air"]
-    assert len(dead) == 12  # the 1.6, 2.5 and 3.0 s gaps, four times over
+    assert len(dead) == 12
     files = {p.name for p in (app.library / "episodes" / ep_id).iterdir()}
     assert {"voice.f32", "original.f32", "preview.m4a", "original.m4a"} <= files and "work" not in files
     assert app.preview_audio(ep_id).name == "preview.m4a"
@@ -381,6 +496,40 @@ def test_real_build_review_and_export(real_episode):
     assert view["chapters"][0]["output_time"] == 0.0 and view["chapters"][1]["output_time"] > 60
     app.remove_pick(ep_id, cold["pick"]["id"])
     app.add_pick(ep_id, "cold open", 40, 44)
+
+    # Listening to the ending and the opening with the music, and timing the sign-off against it.
+    ending = app.section_preview(ep_id, "ending")
+    heard = app.section_audio(ep_id, "ending")
+    assert heard.name == "section-ending.m4a" and not (heard.parent / "section-ending.f32").exists()
+    probe = json.loads(subprocess.run([str(tools.find("ffprobe")), "-v", "error", "-show_entries", "format=duration",
+                                       "-of", "json", str(heard)], capture_output=True, text=True).stdout)
+    assert float(probe["format"]["duration"]) == pytest.approx(ending["to"] - ending["from"], abs=0.2)
+    assert ending["talk_ends_at"] == pytest.approx(30.0, abs=0.01)
+    opening = app.section_preview(ep_id, "opening")
+    assert opening["from"] == 0 and opening["talk_starts_at"] > 50
+    breaks = app.section_preview(ep_id, "breaks")  # the one break, before "Second half", with talk either side
+    assert len(breaks["breaks"]) == 1 and breaks["breaks"][0]["chapter"] == "Second half"
+    assert breaks["breaks"][0]["starts_at"] == 0
+    probe = json.loads(subprocess.run([str(tools.find("ffprobe")), "-v", "error", "-show_entries", "format=duration",
+                                       "-of", "json", str(app.section_audio(ep_id, "breaks"))], capture_output=True,
+                                      text=True).stdout)
+    assert float(probe["format"]["duration"]) == pytest.approx(breaks["to"] - breaks["from"], abs=0.2)
+    assert 30 < breaks["to"] - breaks["from"] < 90
+    app.add_chapter(ep_id, 52, "Third bit")
+    two = app.section_preview(ep_id, "breaks")["breaks"]
+    assert [b["chapter"] for b in two] == ["Second half", "Third bit"] and two[1]["starts_at"] > 30
+    app.undo(ep_id)
+    with pytest.raises(CutzoError):
+        app.section_preview(ep_id, "middle")
+    default = recipes.THE_DIG["outro"]["clips_after"]
+    assert app.get_episode(ep_id)["sign_off_after"] == default == 15.0
+    longer = app.set_sign_off_timing(ep_id, 20)
+    assert longer["after_talk"] == 20 and app.get_episode(ep_id)["sign_off_after"] == 20
+    assert app.section_preview(ep_id, "ending")["to"] == pytest.approx(ending["to"] + 20 - default, abs=0.05)
+    with pytest.raises(CutzoError):
+        app.set_sign_off_timing(ep_id, 60)
+    app.undo(ep_id)
+    assert app.get_episode(ep_id)["sign_off_after"] == default
 
     with pytest.raises(CutzoError):
         app.export(ep_id, ["youtube-4k"])  # video is Phase 3
@@ -483,3 +632,81 @@ def test_engine_routes_for_real_episodes(real_episode):
         assert client.post(f"/api/episodes/{ep_id}/dead-air", json={"longer_than": 1.2}, headers=app_headers).status_code == 200
         assert client.post(f"/api/episodes/{ep_id}/voice", json={"strength": 40}, headers=app_headers).json()["needs_rebuild"]
         assert client.post("/api/reveal", json={"file": "C:/Windows/notepad.exe"}, headers=app_headers).status_code == 404
+
+
+def test_sign_off_timing_moves_the_cold_out():
+    from cutzo.core import shows
+
+    show = shows.get_show("the-dig")
+    ep = _ep(chapters=(0, 200), outro=((580, 590),))
+    def sign_off(e):
+        plan = recipes.plan_episode(e, show, voice_path=Path("v.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
+                                    kit_file=lambda a: Path(a), length_of=lambda a: 1e9)
+        return plan, [p for p in plan.pieces if p.label == "Sign-off"][0]
+    plan, clip = sign_off(ep)
+    assert clip.at == pytest.approx(plan.talk_end + recipes.THE_DIG["outro"]["clips_after"])
+    ep["sign_off_after"] = 9.5
+    plan, clip = sign_off(ep)
+    assert clip.at == pytest.approx(plan.talk_end + 9.5)
+
+
+def test_dig_music_right_away_after_a_haiku():
+    from cutzo.core import shows
+
+    show = shows.get_show("the-dig")
+    ep = _ep(chapters=(0, 200, 400))
+    ep["chapters"][1]["music_hit"] = True
+    ep["edits"].append({"type": "mute", "start": 100.0, "end": 100.4})  # an "um" with its space kept
+    plan = recipes.plan_episode(ep, show, voice_path=Path("v.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
+                                kit_file=lambda a: Path(a), length_of=lambda a: 1e9)
+    brk = recipes.THE_DIG["break"]
+    hit = [p for p in plan.pieces if p.label == "Theme (break, right away)"]
+    normal = [p for p in plan.pieces if p.label == "Theme (break)"]
+    assert len(hit) == 1 and len(normal) == 1
+    stop = plan.talk_start + 200.0  # the punchline's end: no fade-in under the talk, the music starts there
+    assert hit[0].at == pytest.approx(stop, abs=0.01) and hit[0].start == brk["hit_start"]
+    assert hit[0].fade_in == brk["hit_fade_in"] and hit[0].end - hit[0].start == brk["alone"]
+    assert normal[0].at < plan.talk_start + 400 + brk["alone"] + brk["stinger_length"] - brk["lead_in"] + 0.5
+    # The muted "um" is silent but the talk keeps its length.
+    talk = [p for p in plan.pieces if p.label == "Conversation"]
+    assert any(p.end == pytest.approx(100.0) for p in talk) and any(p.start == pytest.approx(100.4) for p in talk)
+    assert sum(p.end - p.start for p in talk) == pytest.approx(600.0 - 0.4, abs=0.01)
+
+
+@needs_ffmpeg
+def test_tv_effect_copies_keep_their_loudness(tmp_path):
+    from cutzo.core import effects
+
+    rate = audio.RATE
+    noise = (np.random.default_rng(3).standard_normal(rate * 6) * 0.1).astype("<f4")
+    voice = tmp_path / "voice.f32"
+    noise.tofile(voice)
+    folder = tmp_path / "clips"
+    path, a, b = effects.clip("tv", voice, 1.0, 4.0, folder)
+    assert a == pytest.approx(effects.PAD) and b - a == pytest.approx(3.0)
+    assert sorted(p.name for p in folder.iterdir()) == [path.name]  # no working files left behind
+    y = np.fromfile(path, dtype="<f4")
+    spec_in = np.abs(np.fft.rfft(noise[rate:rate * 4])) ** 2
+    spec_out = np.abs(np.fft.rfft(y[int(a * rate):int(b * rate)])) ** 2
+    f = np.fft.rfftfreq(3 * rate, 1 / rate)
+
+    def band(spec, lo, hi):
+        return 10 * np.log10(spec[(f >= lo) & (f < hi)].mean())
+
+    shape = [band(spec_out, lo, hi) - band(spec_in, lo, hi) for lo, hi in ((150, 220), (900, 1200), (5500, 7000))]
+    assert shape[1] - shape[0] > 12 and shape[1] - shape[2] > 15  # thin and boxy: a TV speaker
+    assert path == effects.clip("tv", voice, 1.0, 4.0, folder)[0]  # made once, reused
+
+
+def test_dig_clips_sound_like_tv_and_music_dips_under_voices_and_bites():
+    from cutzo.core import shows
+
+    show = shows.get_show("the-dig")
+    ep = _ep(chapters=(0, 200), cold=((500, 510),), outro=((580, 590),))
+    plan = recipes.plan_episode(ep, show, voice_path=Path("v.f32"), talk_lufs=recipes.TALK_REFERENCE_LUFS,
+                                kit_file=lambda a: Path(a), length_of=lambda a: 1e9)
+    effects = {p.label: p.effect for p in plan.pieces}
+    assert effects["Cold open"] == effects["Sign-off"] == "tv" and effects["Conversation"] == ""
+    assert plan.duck_db == 6.5
+    bites = [p for p in plan.pieces if p.label == "Sound bite"]
+    assert any(a <= bites[0].at and bites[0].until <= b for a, b in plan.voice_spans())

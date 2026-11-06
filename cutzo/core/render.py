@@ -4,6 +4,8 @@ A render is a list of pieces placed on the finished timeline. The conversation
 pieces come from voice.f32 (the parts you kept, joined with short crossfades);
 show-kit pieces (music, stingers, sound bites) come from the kit folder. Pieces
 are mixed into one stereo working file, then FFmpeg sets the loudness and encodes.
+Shows with video (The New Heretics) also get a `Picture`: the layers of the frame over
+time, which cutzo.core.video turns into the finished video.
 
 Times: `start`/`end` are inside the piece's source, `at` is on the finished timeline.
 """
@@ -11,7 +13,8 @@ Times: `start`/`end` are inside the piece's source, `at` is on the finished time
 from __future__ import annotations
 
 import bisect
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -20,8 +23,12 @@ import numpy as np
 from ..tools import ffmpeg
 from . import audio, timeline
 
+MUTE_FADE = 0.012  # seconds: the fade either side of a muted "um"
 XFADE = 0.012  # seconds of crossfade at every cut in the conversation
 PEAK_MARGIN = 2.0  # dB between the limiter and the true-peak limit (room for encoding overshoot)
+MONO_IN_STEREO_DB = 10 * math.log10(2)  # a one-channel sound played in both channels measures 3 dB louder
+MAX_GAIN_TRIES = 3  # measuring passes to find the gain that lands on the loudness target after the limiter
+GAIN_CLOSE_ENOUGH = 0.1  # LU
 # Music dips under voices ("ducking"): it starts going down DUCK_ATTACK seconds before a voice comes
 # in, comes back up over DUCK_RELEASE seconds after it stops, and stays down across gaps shorter than
 # DUCK_JOIN seconds (so it doesn't bob between sentences).
@@ -42,7 +49,10 @@ class Piece:
     fade_out: float = 0.0
     kind: str = "voice"  # voice, music, effect, bite
     label: str = ""
-    curve: str = "linear"  # fades: "linear" (crossfades at cuts) or "exp" (smooth music fades, like Premiere's)
+    # fades: "linear" (crossfades at cuts), "exp" (rises evenly in decibels from -50 dB) or "premiere"
+    # (evenly from -30 dB, the shape of Nick's music fade-ins in Spooky Sode, measured Oct 15, 2026)
+    curve: str = "linear"
+    effect: str = ""  # a sound effect made on a copy before mixing (core/effects.py), e.g. "tv"
 
     @property
     def length(self) -> float:
@@ -58,21 +68,75 @@ class Piece:
 
 
 @dataclass
+class Layer:
+    """One picture on the finished timeline. Layers stack in order: later ones cover earlier ones.
+
+    kind "video": a kit video (`src` is its id) from `start` seconds into it, played at `speed`;
+    "still": one frame of a kit video (the one at `start`), held; "title": the episode's title graphic.
+
+    blend "normal" covers what's below (fades are dissolves); "screen" lightens it, like Premiere's
+    Screen mode: black lets the picture below show through, so a flame video on black adds only its
+    flames (and its fades go to and from black, which is the same thing as fading its opacity)."""
+    kind: str
+    src: str
+    at: float
+    length: float
+    start: float = 0.0
+    fade_in: float = 0.0
+    fade_out: float = 0.0
+    label: str = ""
+    blend: str = "normal"
+    speed: float = 1.0
+
+    @property
+    def until(self) -> float:
+        return self.at + self.length
+
+    @property
+    def reach(self) -> float:
+        """How far into its kit video the layer goes (seconds of the video)."""
+        return self.start + (self.length * self.speed if self.kind == "video" else 0.0)
+
+    def view(self) -> dict[str, Any]:
+        out = {"kind": self.kind, "src": self.src, "label": self.label, "at": round(self.at, 3),
+               "length": round(self.length, 3)}
+        if self.blend != "normal":
+            out["blend"] = self.blend
+        if self.speed != 1.0:
+            out["speed"] = round(self.speed, 4)
+        return out
+
+
+@dataclass
+class Picture:
+    """What the video shows: the layers, when the spectrum shows ((start, end, fade in, fade out)
+    windows) and how long the picture takes to fade to black at the very end."""
+    layers: list[Layer] = field(default_factory=list)
+    spectrum: list[tuple[float, float, float, float]] = field(default_factory=list)
+    fade_to_black: float = 0.0
+
+
+@dataclass
 class Plan:
     pieces: list[Piece] = field(default_factory=list)
     chapters: list[dict[str, Any]] = field(default_factory=list)  # finished-file times
     talk_start: float = 0.0
     talk_end: float = 0.0
     duck_db: float = 0.0  # how far music dips while someone talks over it (0 = never)
+    picture: Picture | None = None
+    talk_reference_lufs: float = -19.2  # the talk loudness the kit levels were measured against
 
     @property
     def total(self) -> float:
-        return max((p.until for p in self.pieces), default=0.0)
+        ends = [p.until for p in self.pieces]
+        if self.picture:
+            ends += [layer.until for layer in self.picture.layers]
+        return max(ends, default=0.0)
 
     def voice_spans(self) -> list[tuple[float, float]]:
-        """When someone is talking on the finished timeline (gaps under DUCK_JOIN joined)."""
+        """When someone is talking on the finished timeline, sound bites included (gaps under DUCK_JOIN joined)."""
         spans: list[list[float]] = []
-        for a, b in sorted((p.at, p.until) for p in self.pieces if p.kind == "voice" and p.length > 0):
+        for a, b in sorted((p.at, p.until) for p in self.pieces if p.kind in ("voice", "bite") and p.length > 0):
             if spans and a <= spans[-1][1] + DUCK_JOIN:
                 spans[-1][1] = max(spans[-1][1], b)
             else:
@@ -103,13 +167,20 @@ def duck_curve(t: np.ndarray, spans: list[tuple[float, float]], depth_db: float)
     return (10.0 ** (db / 20.0)).astype(np.float32)
 
 
+def mute_ranges(edits: list[dict[str, Any]]) -> list[tuple[float, float]]:
+    """Fillers taken out with their space kept: silent, but the time stays."""
+    return timeline.merge((e["start"], e["end"]) for e in edits if e["type"] == "mute")
+
+
 def conversation(voice_path: Path, kept: list[tuple[float, float]], at: float,
-                 breaks: dict[float, float] | None = None) -> tuple[list[Piece], Callable[[float], float], float]:
+                 breaks: dict[float, float] | None = None,
+                 mutes: list[tuple[float, float]] | None = None) -> tuple[list[Piece], Callable[[float], float], float]:
     """Place the kept stretches of the conversation one after another from `at`.
 
     `breaks` maps a recording time (a chapter start) to seconds of pause inserted just before it
-    (for segment breaks). Returns the pieces, a function mapping recording time -> finished time,
-    and where the talk ends."""
+    (for segment breaks). `mutes` are stretches that stay in the timeline but are silent (an "um"
+    taken out with its space kept). Returns the pieces, a function mapping recording time ->
+    finished time, and where the talk ends."""
     pending = sorted((breaks or {}).items())
     pieces: list[Piece] = []
     spans: list[tuple[float, float, float]] = []  # (recording a, recording b, finished time of a)
@@ -129,6 +200,8 @@ def conversation(voice_path: Path, kept: list[tuple[float, float]], at: float,
             spans.append((x, y, start_at))
             cursor = start_at + (y - x)
     talk_end = cursor
+    if mutes:
+        pieces = _silence(pieces, mutes)
 
     def to_finished(t: float) -> float:
         for x, y, f in spans:
@@ -142,19 +215,45 @@ def conversation(voice_path: Path, kept: list[tuple[float, float]], at: float,
     return pieces, to_finished, talk_end
 
 
+def _silence(pieces: list[Piece], mutes: list[tuple[float, float]]) -> list[Piece]:
+    """Split the conversation's pieces around the muted stretches: the time stays, the sound goes (with
+    short fades either side, so the edges don't click)."""
+    out: list[Piece] = []
+    for p in pieces:
+        holes = [(max(a, p.start), min(b, p.end)) for a, b in mutes if a < p.end and b > p.start]
+        if not holes:
+            out.append(p)
+            continue
+        cursor = p.start
+        for a, b in holes + [(p.end, p.end)]:
+            if a - cursor > 0.01:
+                first, last = cursor == p.start, a >= p.end
+                out.append(replace(p, start=cursor, end=a, at=p.at + (cursor - p.start),
+                                   fade_in=p.fade_in if first else MUTE_FADE,
+                                   fade_out=p.fade_out if last else MUTE_FADE))
+            cursor = max(cursor, b)
+    return out
+
+
 def mix(plan: Plan, dst: Path, *, check: Callable[[], None] | None = None,
-        progress: Callable[[float], None] | None = None) -> Path:
-    """Mix every piece into one stereo working file (interleaved .f32, 48 kHz)."""
+        progress: Callable[[float], None] | None = None, window: tuple[float, float] | None = None) -> Path:
+    """Mix every piece into one stereo working file (interleaved .f32, 48 kHz). With `window` (start, end in
+    finished-file seconds), only that stretch, starting at 0 (to listen to the opening or the ending)."""
     rate = audio.RATE
-    frames = int(np.ceil(plan.total * rate)) + 1
+    if window:
+        base = max(0, int(round(window[0] * rate)))
+        frames = max(1, int(np.ceil(min(window[1], plan.total) * rate)) - base)
+    else:
+        base, frames = 0, int(np.ceil(plan.total * rate)) + 1
     out = np.memmap(dst, dtype="<f4", mode="w+", shape=(frames, 2))
     block = audio.BLOCK
     sources: dict[tuple[Path, int], np.ndarray] = {}
     spans = plan.voice_spans() if plan.duck_db > 0 else []
-    for pos in range(0, frames, block):
+    for opos in range(0, frames, block):
         if check:
             check()
-        end = min(frames, pos + block)
+        pos = base + opos
+        end = min(base + frames, pos + block)
         acc = np.zeros((end - pos, 2), dtype=np.float32)
         t0, t1 = pos / rate, end / rate
         for p in plan.pieces:
@@ -189,18 +288,21 @@ def mix(plan: Plan, dst: Path, *, check: Callable[[], None] | None = None,
             if p.channels == 1:
                 seg = np.repeat(seg, 2, axis=1) if seg.ndim == 2 else np.stack([seg, seg], axis=1)
             acc[a - pos:a - pos + n] += seg[:, :2] * gain[:, None]
-        out[pos:end] = acc
+        out[opos:opos + (end - pos)] = acc
         if progress:
-            progress(end / frames)
+            progress((end - base) / frames)
     out.flush()
     del out
     return dst
 
 
 def _shape(ramp: np.ndarray, curve: str) -> np.ndarray:
-    """0..1 ramp -> gain. "exp" rises evenly in decibels (-50 dB to 0), which sounds smooth for music."""
+    """0..1 ramp -> gain. "exp" rises evenly in decibels (-50 dB to 0), which sounds smooth for music;
+    "premiere" rises evenly from -30 dB (starting from silence over the first tenth, so there's no click)."""
     if curve == "exp":
         return np.where(ramp <= 0.0, 0.0, 10.0 ** ((ramp - 1.0) * 2.5)).astype(np.float32)
+    if curve == "premiere":
+        return (10.0 ** ((ramp - 1.0) * 1.5) * np.clip(ramp * 10.0, 0.0, 1.0)).astype(np.float32)
     return ramp.astype(np.float32)
 
 
@@ -211,11 +313,11 @@ def kept_ranges(duration: float, edits: list[dict[str, Any]]) -> list[tuple[floa
 
 def encode(mix_path: Path, dst: Path, spec: dict[str, Any], *, tags: dict[str, str], chapters: list[dict[str, Any]],
            total: float, check: Callable[[], None] | None = None, measured: dict[str, float] | None = None,
-           trim_db: float = 0.0, ceiling_db: float | None = None,
+           gain_db: float | None = None, ceiling_db: float | None = None,
            progress: Callable[[float, str], None] | None = None) -> dict[str, Any]:
     """Set the loudness (measure, one steady gain, peak limiter) and encode the stereo mix into the
-    finished file. `trim_db` nudges the gain when a first try came out a little off target;
-    `ceiling_db` (dBFS) lowers the limiter when encoding pushed the peaks over the limit."""
+    finished file. `gain_db` sets the gain outright (a second try, when the first came out a little
+    off target); `ceiling_db` (dBFS) lowers the limiter when encoding pushed the peaks over the limit."""
     def report(share: float, label: str) -> None:
         if progress:
             progress(share, label)
@@ -230,10 +332,28 @@ def encode(mix_path: Path, dst: Path, spec: dict[str, Any], *, tags: dict[str, s
     # One steady gain to reach the loudness target (no pumping), then a peak limiter that only
     # touches the loudest moments. MP3 and AAC encoding push peaks up again (by 1 to 2 dB on music
     # in tests), so the limiter sits PEAK_MARGIN under the limit; the check catches the rest.
-    gain = spec["loudness"] - measured["integrated"] + trim_db
     if ceiling_db is None:
         ceiling_db = spec["true_peak_max"] - PEAK_MARGIN
-    filters = f"volume={gain:.2f}dB,alimiter=limit={10 ** (ceiling_db / 20.0):.4f}:attack=5:release=60:level=false"
+
+    def chain(g: float) -> str:
+        return f"volume={g:.2f}dB,alimiter=limit={10 ** (ceiling_db / 20.0):.4f}:attack=5:release=60:level=false"
+
+    if gain_db is not None:
+        gain = gain_db
+    else:
+        # The limiter takes some loudness away (at YouTube's -14 LUFS enough for Spooky Sode's first
+        # encode to miss), so measure what gain plus limiter make and correct the gain before encoding:
+        # much quicker than encoding twice (AAC at 384 kbps runs at only about 9x real time). Encoding
+        # itself barely moves the loudness; the check afterwards still catches anything left.
+        gain = spec["loudness"] - measured["integrated"]
+        for _ in range(MAX_GAIN_TRIES):
+            report(0.4, "Setting the loudness")
+            out = ffmpeg.loudness(mix_path, channels=2, duration=total, check=check, filters=chain(gain), peak=False)
+            off = spec["loudness"] - out["integrated"]
+            if abs(off) <= GAIN_CLOSE_ENOUGH:
+                break
+            gain += off
+    filters = chain(gain)
     args = [*ffmpeg.raw_input_args(mix_path, 2), "-i", str(meta), "-map", "0:a", "-map_metadata", "1",
             "-map_chapters", "1", "-af", filters, "-ac", str(spec["channels"]), "-ar", str(spec["rate"])]
     if spec["codec"] == "mp3":
@@ -267,7 +387,11 @@ def check_file(path: Path, spec: dict[str, Any], *, check: Callable[[], None] | 
          {1: "Mono", 2: "Stereo"}.get(a.get("channels"), str(a.get("channels"))), a.get("channels") == spec["channels"])
     rule("Sample rate", f"{spec['rate'] / 1000:g} kHz", f"{(a.get('rate') or 0) / 1000:g} kHz", a.get("rate") == spec["rate"])
     kbps = round((a.get("bit_rate") or info.get("bit_rate") or 0) / 1000)
-    rule("Bitrate", f"{spec['bitrate_kbps']} kbps", f"{kbps} kbps", abs(kbps - spec["bitrate_kbps"]) <= 8)
+    if spec["codec"] == "aac":  # AAC spends fewer bits on simple sound: the target is an upper bound
+        rule("Bitrate", f"up to {spec['bitrate_kbps']} kbps", f"{kbps} kbps",
+             spec["bitrate_kbps"] * 0.4 <= kbps <= spec["bitrate_kbps"] + 16)
+    else:
+        rule("Bitrate", f"{spec['bitrate_kbps']} kbps", f"{kbps} kbps", abs(kbps - spec["bitrate_kbps"]) <= 8)
     rule("Loudness", f"{spec['loudness']:g} LUFS (±{spec['loudness_tolerance']:g})", f"{lv['integrated']:.1f} LUFS",
          abs(lv["integrated"] - spec["loudness"]) <= spec["loudness_tolerance"])
     rule("Peaks", f"at or below {spec['true_peak_max']:g} dBTP", f"{lv['true_peak']:.1f} dBTP",

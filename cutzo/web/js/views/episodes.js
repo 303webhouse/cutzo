@@ -25,7 +25,7 @@ export function chain(stages) {
 }
 
 export function statusWord(status) {
-  return { done: "done", running: "running", ready: "ready", todo: "to do", later: "comes in Phase 3" }[status] || status;
+  return { done: "done", running: "running", ready: "ready", todo: "to do", later: "not done yet" }[status] || status;
 }
 
 export async function render(main, params, ctx) {

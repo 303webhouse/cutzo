@@ -2,6 +2,9 @@
 
     FFmpeg        decoding, filters, loudness, encoding      (cutzo.tools.ffmpeg)
     DeepFilterNet noise removal for voices                   (cutzo.tools.deepfilter)
+    whisper.cpp   its parakeet-cli runs speech to text on    (cutzo.tools.parakeet)
+                  the graphics card, with NVIDIA's Parakeet
+                  speech model (a data file)
 
 Setup downloads them into <app>/tools/<name>-<version>/ and checks each download
 against the SHA-256 recorded here (see install.py). Anywhere else (tests, Linux)
@@ -28,7 +31,7 @@ class Download:
     url: str
     sha256: str
     size: int
-    kind: str  # "zip" (keep the folder `inner`) or "exe" (a single program)
+    kind: str  # "zip" or "tar.gz" (keep the folder `inner`), "exe" (one program) or "file" (one data file)
     inner: str | None = None
 
 
@@ -41,6 +44,8 @@ class Tool:
     downloads: dict[str, Download] = field(default_factory=dict)  # platform key -> download
     license: str = ""
     homepage: str = ""
+    files: dict[str, str] = field(default_factory=dict)  # data file name -> path inside the tool's folder
+    env: str | None = None  # an environment variable that can point at the data file instead (tests)
 
     @property
     def folder(self) -> str:
@@ -88,8 +93,63 @@ DEEPFILTER = Tool(
     homepage="https://github.com/Rikorose/DeepFilterNet",
 )
 
-TOOLS = {t.name: t for t in (FFMPEG, DEEPFILTER)}
+# whisper.cpp 1.9.5 (release b5454), for its parakeet-cli. Windows: the CUDA 12.4 build, which
+# carries its own cuBLAS (the CUDA 11.8 build doesn't, so it can't find the graphics card).
+# Linux: a CPU build for tests.
+WHISPER = Tool(
+    name="whisper",
+    label="Speech to text (whisper.cpp)",
+    version="1.9.5",
+    programs={"parakeet-cli": "parakeet-cli"},
+    downloads={
+        "windows-x86_64": Download(
+            url="https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-win-cuda-12.4.0-x64.zip",
+            sha256="afef0b881c500958921c3f5523b50e59ee2ec9b6f5cbd25b324c51ed308a957a",
+            size=684913404,
+            kind="zip",
+            inner="Release",
+        ),
+        "linux-x86_64": Download(
+            url="https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-ubuntu-x64.tar.gz",
+            sha256="a72becf15d7917f990f6313867a52638b82b7f9ef237fb0c980dac56a135781c",
+            size=10364195,
+            kind="tar.gz",
+            inner="whisper-bin-ubuntu-x64",
+        ),
+    },
+    license="MIT",
+    homepage="https://github.com/ggml-org/whisper.cpp",
+)
+
+# NVIDIA's Parakeet TDT 0.6B v3 in whisper.cpp's format (16-bit, 1.3 GB), pinned to one revision
+# of the ggml-org/parakeet-GGUF repository on Hugging Face. The 8-bit file is half the size but
+# ran three times slower on Nick's graphics card.
+PARAKEET_MODEL = Tool(
+    name="parakeet-model",
+    label="Speech model (Parakeet TDT 0.6B v3)",
+    version="tdt-0.6b-v3",
+    programs={},
+    files={"parakeet-model": "ggml-parakeet-tdt-0.6b-v3-f16.bin"},
+    downloads={
+        "windows-x86_64": Download(
+            url="https://huggingface.co/ggml-org/parakeet-GGUF/resolve/35156454d1a39de06863303dd209fd2bed6ee079/"
+                "ggml-parakeet-tdt-0.6b-v3-f16.bin",
+            sha256="833bffc9513b2cae867ee9e51633cfd11e4d51aaa5597c8ac02159385a2b426f",
+            size=1255897319,
+            kind="file",
+        ),
+    },
+    license="CC-BY-4.0 (NVIDIA parakeet-tdt-0.6b-v3 weights)",
+    homepage="https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
+    env="CUTZO_PARAKEET_MODEL",
+)
+
+# Tools Cutzo used to install and no longer needs; setup deletes Cutzo's own copies of them.
+RETIRED = ("whisper-model",)  # Whisper large-v3 turbo (1.6 GB), replaced by Parakeet on Oct 15, 2026
+
+TOOLS = {t.name: t for t in (FFMPEG, DEEPFILTER, WHISPER, PARAKEET_MODEL)}
 _OWNER = {program: tool for tool in TOOLS.values() for program in tool.programs}
+_FILE_OWNER = {name: tool for tool in TOOLS.values() for name in tool.files}
 
 
 def platform_key() -> str:
@@ -111,6 +171,36 @@ def _exe(path: Path) -> Path:
 def installed_path(program: str) -> Path:
     tool = _OWNER[program]
     return _exe(tools_dir() / tool.folder / tool.programs[program])
+
+
+def installed_file(name: str) -> Path:
+    tool = _FILE_OWNER[name]
+    return tools_dir() / tool.folder / tool.files[name]
+
+
+def find_file(name: str) -> Path | None:
+    """A data file a tool needs (a speech model): Cutzo's own copy, or where the tool's
+    environment variable points."""
+    tool = _FILE_OWNER[name]
+    own = installed_file(name)
+    if own.is_file():
+        return own
+    other = os.environ.get(tool.env or "") if tool.env else None
+    return Path(other) if other and Path(other).is_file() else None
+
+
+def require_file(name: str) -> Path:
+    path = find_file(name)
+    if path is None:
+        tool = _FILE_OWNER[name]
+        raise CutzoError(f"{tool.label} isn't installed yet, and Cutzo needs it for this.",
+                         hint="Double-click “Update Cutzo” in the Cutzo folder; it downloads it (a big file, once).")
+    return path
+
+
+def available(*names: str) -> bool:
+    """True when every named program or data file can be found."""
+    return all((find_file(n) if n in _FILE_OWNER else find(n)) is not None for n in names)
 
 
 def find(program: str) -> Path | None:
@@ -140,8 +230,9 @@ def status() -> list[dict[str, object]]:
     out = []
     for tool in TOOLS.values():
         paths = {p: find(p) for p in tool.programs}
+        paths.update({f: find_file(f) for f in tool.files})
         ok = all(paths.values())
-        own = all(installed_path(p).is_file() for p in tool.programs)
+        own = all(installed_path(p).is_file() for p in tool.programs) and all(installed_file(f).is_file() for f in tool.files)
         out.append({
             "tool": tool.name,
             "label": tool.label,

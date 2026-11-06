@@ -433,6 +433,27 @@ p { margin: 0 0 10px; }
 .chapter-title { font-weight: 700; }
 .add-chapter { display: grid; grid-template-columns: 84px minmax(0, 1fr) auto; gap: 8px; margin-top: 12px; }
 .add-chapter input { padding: 8px 10px; }
+.seg-toggle { display: flex; align-items: center; gap: 6px; margin-top: 6px; color: var(--ink-soft); cursor: pointer; }
+.seg-toggle input { accent-color: var(--ink); }
+.item-text.item-wrap { white-space: normal; }
+.player-box { margin: 10px 0 4px; }
+.export-video { display: block; width: 100%; max-height: 70vh; background: var(--deck); border-radius: var(--r-md); }
+.export-audio { display: block; width: 100%; }
+#extras-side .field { margin: 10px 0 0; font-weight: 600; }
+#extras-side .field input, #extras-side .field select { padding: 8px 10px; font-weight: 400; }
+#extras-side .where { display: grid; grid-template-columns: minmax(0, 1fr) 84px; gap: 8px; }
+#extras-side .where.no-time { grid-template-columns: minmax(0, 1fr); }
+#extras-side .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+#extras-side details { margin-top: 10px; }
+#extras-side summary { cursor: pointer; font-weight: 700; font-size: var(--s-1); padding: 6px 0; }
+#extras-side .btn { margin-top: 12px; }
+#title-graphic .field { margin: 10px 0 0; font-weight: 600; }
+#title-graphic .field input { padding: 8px 10px; font-weight: 400; }
+.mark-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.mark-list li { display: flex; gap: 8px; align-items: baseline; }
+.mark-list li.done span { color: var(--ink-soft); text-decoration: line-through; }
+#teaser .field input, #teaser .field textarea { font-weight: 400; }
+#title-graphic .btn { margin-top: 12px; }
 .copybox { width: 100%; min-height: 92px; font-size: var(--s-1); font-variant-numeric: tabular-nums; resize: vertical; }
 .dead-list { margin-top: 10px; }
 .dead-list summary { cursor: pointer; font-weight: 700; font-size: var(--s-1); padding: 6px 0; }
@@ -537,6 +558,10 @@ table.kit-table { table-layout: fixed; }
 .closed .page-title { margin-bottom: 14px; }
 
 /* ------------------------------------------------------------ toasts */
+.hear-music { margin-top: 14px; display: grid; gap: 10px; }
+.hear-music .dead-air { margin: 0; }
+.section-player { width: 100%; }
+.follow-back { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 45; }
 .toasts { position: fixed; right: 20px; bottom: 20px; display: grid; gap: 10px; z-index: 50; width: min(390px, calc(100vw - 32px)); }
 .toast {
   cursor: pointer;

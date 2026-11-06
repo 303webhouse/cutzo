@@ -70,6 +70,10 @@ def test_errors_are_plain_words(client):
     assert big.status_code == 409
     failed = client.get("/api/activity?reads=false&limit=1").json()["entries"][0]
     assert failed["ok"] is False and failed["summary"].startswith("Paused")
+    extra = client.post("/api/episodes/spooky/extras", json={"file": "Haiku Intro", "time": "0:20"}, headers=APP)
+    assert extra.status_code == 400 and "real episodes" in extra.json()["error"]  # sample episodes are pretend
+    gone = client.delete("/api/episodes/spooky/extras/i99", headers=APP)
+    assert gone.status_code == 404 and "No extra" in gone.json()["error"]
 
 
 def test_jobs_and_state(client, cutzo):
@@ -125,3 +129,13 @@ def test_broken_settings_file_is_reported(tmp_path, monkeypatch):
     bad.write_text('{"library_folder": "D:\\\\Podcasts", "port": 80}', encoding="utf-8")
     with pytest.raises(config.SettingsError):
         config.load_settings()
+
+
+def test_teaser_routes(client):
+    brief = client.get("/api/episodes/spooky/teaser-brief?part=1")
+    assert brief.status_code == 200 and brief.json()["parts"] == 1
+    assert client.get("/api/episodes/spooky/teaser-brief?part=3").status_code == 400
+    saved = client.post("/api/episodes/spooky/teaser", json={"text": "Ghosts.", "title": "Boo"}, headers=CLAUDE)
+    assert saved.status_code == 200 and saved.json()["teaser"]["by"] == "claude"
+    assert client.get("/api/episodes/spooky").json()["teaser"]["title"] == "Boo"
+    assert client.post("/api/episodes/spooky/teaser", json={"text": "x"}).status_code == 403  # no source header

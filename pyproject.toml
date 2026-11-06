@@ -13,6 +13,7 @@ dependencies = [
     "uvicorn>=0.30,<1",
     "mcp>=2.3,<3",
     "numpy>=1.26,<3",
+    "pillow>=10,<13",
 ]
 
 [project.optional-dependencies]
@@ -29,7 +30,7 @@ cutzo = "cutzo.launcher:main"
 include = ["cutzo*"]
 
 [tool.setuptools.package-data]
-cutzo = ["web/*", "web/**/*"]
+cutzo = ["web/*", "web/**/*", "assets/*", "assets/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
