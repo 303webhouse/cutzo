@@ -171,8 +171,9 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
   `Cutzo._render_layout` swaps it in. The curve was measured on his Season Debrief Part 2 MP3 against the raw
   recording (`lab\tv_measure.py`); his Premiere project only stores the effect as unnamed filters.
 - Whine removal (Nov 5, Time to Sell: a fan-like ~1,104 Hz whine in the first minutes that DeepFilterNet at 25
-  leaves in): `core/tones.py` finds steady tones in the pauses (transcript gaps, 15 s windows, peaks 12 dB over
-  their neighbours, 200 Hz-12 kHz) and notches them out of `voice.f32` in place (two `bandreject`s per tone,
+  leaves in): `core/tones.py` finds steady tones in the pauses (transcript gaps, 15 s windows; only the quiet pause
+  frames; peaks 15 dB over their neighbours in 70% of them, 200 Hz-12 kHz; a voice's harmonics are refused;
+  one window alone needs 20 dB; the same tone within 60 s joins up) and notches them out of `voice.f32` in place (two `bandreject`s per tone,
   2 s padding, 0.5 s crossfades), keeping the original samples in `<episode>/whine/` so `restore` puts them back.
   `Cutzo.remove_whine(on=)` is a job (route `/whine`, connector `remove_whine`, a button under Cleanup strength);
   `ep["whine"]["stretches"]`; it remakes `preview.m4a` and drops caches made from the voice there (waveforms,

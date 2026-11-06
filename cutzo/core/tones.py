@@ -23,7 +23,11 @@ from . import audio
 N = 8192  # samples per spectrum (5.9 Hz steps at 48 kHz)
 WINDOW = 15.0  # seconds per window
 MIN_FRAMES = 6  # pause frames a window needs to be judged
-RISE_DB = 12.0  # how far a peak must stand above its neighbours to count as a tone
+RISE_DB = 15.0  # how far a peak must stand above its neighbours to count as a tone
+STRONG_DB = 20.0  # a tone found in only one window must stand out at least this far
+QUIET_DB = 6.0  # pause frames within this of the quietest ones are judged (voices leak into the rest)
+STEADY_DB = 6.0  # a tone must stand this far out of a single frame...
+STEADY_SHARE = 0.7  # ...in this share of the quiet frames
 LO, HI = 200.0, 12000.0  # Hz; below 200 a steady hum sits among voices' own pitches
 NEIGHBOURS = 31  # spectrum steps either side used for "neighbours" (about 180 Hz)
 MIN_GAP = 0.35  # seconds between words that count as a pause
@@ -31,6 +35,7 @@ PAD = 2.0  # seconds filtered before and after a stretch
 FADE = 0.5  # seconds of crossfade in and out
 SETTLE = 1.0  # extra seconds filtered and thrown away, so the filters have settled
 MAX_UNKNOWN = 2  # windows without pauses allowed inside a stretch
+JOIN_GAP = 60.0  # seconds: stretches this close with the same tone are one
 MAX_TONES = 8
 
 Check = Callable[[], None] | None
@@ -44,7 +49,11 @@ def pauses(words: Iterable[dict[str, Any]], min_gap: float = MIN_GAP) -> list[tu
 
 def _window_tones(data: np.ndarray, gaps: list[tuple[float, float]], lo: float, hi: float,
                   rise_db: float) -> list[tuple[float, float]] | None:
-    """(Hz, dB above neighbours) of the steady tones in these pauses, or None if there's too little pause."""
+    """(Hz, dB above neighbours) of the steady tones in these pauses, or None if there's too little pause.
+
+    Only the quiet pause frames count (a laugh or someone talking softly where the transcript has no
+    words would bring their voice's pitch in), a tone has to be there in most of them, and a window whose
+    tones line up as one pitch's harmonics is a voice, not a whine."""
     rate = audio.RATE
     win = np.hanning(N)
     frames = []
@@ -54,20 +63,45 @@ def _window_tones(data: np.ndarray, gaps: list[tuple[float, float]], lo: float, 
             frames.append(np.abs(np.fft.rfft(seg[i:i + N] * win)) ** 2)
     if len(frames) < MIN_FRAMES:
         return None
-    p = 10 * np.log10(np.median(np.array(frames), axis=0) + 1e-20)
     f = np.fft.rfftfreq(N, 1 / rate)
+    band = (f >= 200) & (f <= 4000)
+    # How loud each frame is, by the median of its spectrum: a voice raises it, a narrow tone doesn't.
+    levels = 10 * np.log10(np.median(np.array(frames)[:, band], axis=1) + 1e-30)
+    quiet = levels <= np.quantile(levels, 0.1) + QUIET_DB
+    if quiet.sum() < MIN_FRAMES:
+        return None
+    each = 10 * np.log10(np.array(frames)[quiet] + 1e-20)
+    p = np.median(each, axis=0)
     k = NEIGHBOURS
     pad = np.pad(p, k, mode="edge")
-    windows = np.lib.stride_tricks.sliding_window_view(pad, 2 * k + 1)
-    rise = p - np.median(windows, axis=1)
+    base = np.median(np.lib.stride_tricks.sliding_window_view(pad, 2 * k + 1), axis=1)
+    rise = p - base
     out = []
     for i in range(1, len(p) - 1):
         if not lo <= f[i] <= hi or rise[i] < rise_db or p[i] < p[i - 1] or p[i] < p[i + 1]:
             continue
+        steady = np.mean(each[:, i - 1:i + 2].max(axis=1) - base[i] >= STEADY_DB)
+        if steady < STEADY_SHARE:
+            continue
         a, b, c = p[i - 1], p[i], p[i + 1]  # finer pitch from the peak's shape
         shift = 0.5 * (a - c) / (a - 2 * b + c) if (a - 2 * b + c) else 0.0
         out.append((float(f[i] + shift * (f[1] - f[0])), float(rise[i])))
+    if _harmonics(out):
+        return []
     return out
+
+
+def _harmonics(tones: list[tuple[float, float]]) -> bool:
+    """True if these tones line up as one voice's pitch (70-400 Hz) and its overtones: three or more of them,
+    or every one of two or more (all within the sixth overtone)."""
+    hz = [t for t, _ in tones]
+    if len(hz) < 2:
+        return False
+    for f0 in np.arange(70.0, 400.0, 0.5):
+        fits = [x for x in hz if 1 <= round(x / f0) <= 6 and abs(x - round(x / f0) * f0) <= min(max(3.0, 0.01 * x), 0.08 * f0)]
+        if len(fits) >= 3 or len(fits) == len(hz):
+            return True
+    return False
 
 
 def _group(found: list[tuple[float, float]]) -> list[dict[str, Any]]:
@@ -124,6 +158,16 @@ def find(voice_path: Path, words: Iterable[dict[str, Any]], *, start: float | No
             current, unknown = None, 0
     if current:
         stretches.append(current)
+    joined: list[dict[str, Any]] = []
+    for s in stretches:  # a whirr comes and goes: the same tone again soon after is the same whine
+        last = joined[-1] if joined else None
+        if last and s["start"] - last["end"] <= JOIN_GAP and any(
+                abs(x - y) <= 0.02 * y for x, _ in s["found"] for y, _ in last["found"]):
+            last["end"] = s["end"]
+            last["found"] += s["found"]
+        else:
+            joined.append(s)
+    stretches = [s for s in joined if s["end"] - s["start"] > WINDOW + 0.01 or max(r for _, r in s["found"]) >= STRONG_DB]
     return [{"start": round(s["start"], 2), "end": round(s["end"], 2), "tones": _group(s["found"])} for s in stretches]
 
 
