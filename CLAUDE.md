@@ -148,7 +148,9 @@ scripts/setup.ps1, scripts/update.ps1  + Setup Cutzo.bat / Update Cutzo.bat (CRL
   button appears when the word is off screen; after clicking it the page follows until he scrolls.
 - Hearing the music on Review (Oct 21): `Cutzo.section_preview` mixes just the opening or the ending of the
   finished layout (`render.mix(window=...)`, levelled to the MP3's loudness) into `section-<which>.m4a`
-  (route `/section-preview`, played via `/section-audio`). `set_sign_off_timing` (`ep["sign_off_after"]`,
+  (route `/section-preview`, played via `/section-audio`). "breaks" (Nov 5) plays every music break one
+  after another, 8 s of talk before and 12 s after each (`_break_windows`: break music and stinger pieces).
+  `set_sign_off_timing` (`ep["sign_off_after"]`,
   The Dig's default 3 s) moves the cold out against the ending music; both sit under the picks on Review.
 - Nov 5 (Nick, before recording a Dig): (1) an "um"/"uh" cut on its own keeps its space: `cut_words` and
   word selections made only of fillers (`captions.FILLERS`) become `type: "mute"` edits (reason "filler

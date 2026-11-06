@@ -507,6 +507,18 @@ def test_real_build_review_and_export(real_episode):
     assert ending["talk_ends_at"] == pytest.approx(30.0, abs=0.01)
     opening = app.section_preview(ep_id, "opening")
     assert opening["from"] == 0 and opening["talk_starts_at"] > 50
+    breaks = app.section_preview(ep_id, "breaks")  # the one break, before "Second half", with talk either side
+    assert len(breaks["breaks"]) == 1 and breaks["breaks"][0]["chapter"] == "Second half"
+    assert breaks["breaks"][0]["starts_at"] == 0
+    probe = json.loads(subprocess.run([str(tools.find("ffprobe")), "-v", "error", "-show_entries", "format=duration",
+                                       "-of", "json", str(app.section_audio(ep_id, "breaks"))], capture_output=True,
+                                      text=True).stdout)
+    assert float(probe["format"]["duration"]) == pytest.approx(breaks["to"] - breaks["from"], abs=0.2)
+    assert 30 < breaks["to"] - breaks["from"] < 90
+    app.add_chapter(ep_id, 52, "Third bit")
+    two = app.section_preview(ep_id, "breaks")["breaks"]
+    assert [b["chapter"] for b in two] == ["Second half", "Third bit"] and two[1]["starts_at"] > 30
+    app.undo(ep_id)
     with pytest.raises(CutzoError):
         app.section_preview(ep_id, "middle")
     assert app.get_episode(ep_id)["sign_off_after"] == 3.0

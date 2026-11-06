@@ -21,6 +21,8 @@ import threading
 import zlib
 from datetime import datetime
 from pathlib import Path
+
+import numpy as np
 from typing import Any, Iterable
 
 from .. import PHASE, __version__
@@ -1958,7 +1960,8 @@ class Cutzo:
                 layout.pieces[k] = dataclasses.replace(p, src=src, start=a, end=b)
         return layout, talk, kit_file
 
-    SECTIONS = {"opening": "the opening", "ending": "the ending"}
+    SECTIONS = {"opening": "the opening", "breaks": "the breaks", "ending": "the ending"}
+    BREAK_LEAD, BREAK_TAIL, BREAK_GAP = 8.0, 12.0, 1.5  # talk before and after each break; silence between
 
     def section_preview(self, episode: str, which: str = "ending", source: str = "you") -> dict[str, Any]:
         """Mix just the opening (cold open, theme, sound bites, the first words) or the ending (the last
@@ -1981,28 +1984,63 @@ class Cutzo:
         toolbox.require("ffmpeg")
         layout, talk, _ = self._render_layout(ep, show)
         if key == "opening":
-            a, b = 0.0, layout.talk_start + 20.0
+            windows = [(0.0, min(layout.talk_start + 20.0, layout.total))]
+        elif key == "breaks":
+            windows = self._break_windows(layout)
+            if not windows:
+                raise CutzoError("This episode has no music breaks yet: they come before each chapter after the first.",
+                                 hint="Add a chapter where a new segment starts.")
         else:
-            a, b = max(0.0, layout.talk_end - 30.0), layout.total
-        b = min(b, layout.total)
+            windows = [(max(0.0, layout.talk_end - 30.0), layout.total)]
+        a, b = windows[0][0], windows[-1][1]
         mix_path = self.guard.writable(ep_dir / f"section-{key}.f32")
+        part = self.guard.writable(ep_dir / f"section-{key}.piece.f32")
         dst = self.guard.writable(ep_dir / f"section-{key}.m4a")
+        breaks = []
         try:
-            render.mix(layout, mix_path, window=(a, b))
+            if key != "breaks":
+                render.mix(layout, mix_path, window=windows[0])
+            else:  # each break with a little talk either side, one after another
+                pos = 0.0
+                with open(mix_path, "wb") as out:
+                    for k, (w0, w1) in enumerate(windows):
+                        if k:
+                            np.zeros(int(self.BREAK_GAP * audio.RATE) * 2, dtype="<f4").tofile(out)
+                            pos += self.BREAK_GAP
+                        render.mix(layout, part, window=(w0, w1))
+                        out.write(part.read_bytes())
+                        chapter = next((c for c in layout.chapters if w0 + self.BREAK_LEAD - 0.01 <= c["time"] <= w1 + 1), None)
+                        breaks.append({"starts_at": round(pos, 2), "in_finished_file": fmt_time(w0 + self.BREAK_LEAD),
+                                       "chapter": (chapter or {}).get("title")})
+                        pos += w1 - w0
+                b = a + pos
             # About as loud as the finished MP3: its target, for talk that plays in both channels.
             gain = presets.get_preset("podcast-mp3")["spec"]["loudness"] - (talk + render.MONO_IN_STEREO_DB)
             tmp = dst.with_name(dst.stem + ".part.m4a")
             ffmpeg.run([*ffmpeg.raw_input_args(mix_path, 2), "-af", f"volume={gain:.2f}dB,alimiter=limit=0.89:level=false",
                         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-f", "mp4", str(tmp)],
-                       duration=b - a)
+                       duration=audio.Pcm(mix_path, channels=2).duration)
             tmp.replace(dst)
         finally:
             mix_path.unlink(missing_ok=True)
+            part.unlink(missing_ok=True)
         self._log_read(source, "section_preview", f"listened to {self.SECTIONS[key]} of {_q(ep['title'], 40)}", ep["id"])
         return {"which": key, "from": round(a, 3), "to": round(b, 3), "from_text": fmt_time(a), "to_text": fmt_time(b),
                 "talk_ends_at": round(layout.talk_end - a, 3) if key == "ending" else None,
                 "talk_starts_at": round(layout.talk_start - a, 3) if key == "opening" else None,
-                "made": now_iso()}
+                "breaks": breaks or None, "made": now_iso()}
+
+    def _break_windows(self, layout: render.Plan) -> list[tuple[float, float]]:
+        """Finished-file stretches around each music break: its music (and stinger), a little talk either side."""
+        cues = sorted((p.at, p.until) for p in layout.pieces
+                      if (p.kind == "music" and "break" in p.label.lower()) or p.label == "Stinger")
+        groups: list[list[float]] = []
+        for a, b in cues:
+            if groups and a <= groups[-1][1] + 1.0:
+                groups[-1][1] = max(groups[-1][1], b)
+            else:
+                groups.append([a, b])
+        return [(max(0.0, a - self.BREAK_LEAD), min(layout.total, b + self.BREAK_TAIL)) for a, b in groups]
 
     def section_audio(self, episode: str, which: str) -> Path:
         ep_id = self.resolve_episode(episode)

@@ -329,6 +329,9 @@ export function mountReview(container, initialEp, ctx) {
       add(box, h("div", { class: "row" },
         h("b", { class: "small" }, "Hear it with the music:"),
         h("button", { class: "btn btn-small", disabled: !!busy, onclick: make("opening") }, busy === "opening" ? "Mixing\u2026" : "The opening"),
+        ep.chapters.length > 1
+          ? h("button", { class: "btn btn-small", disabled: !!busy, onclick: make("breaks") }, busy === "breaks" ? "Mixing\u2026" : "The breaks")
+          : null,
         h("button", { class: "btn btn-small", disabled: !!busy, onclick: make("ending") }, busy === "ending" ? "Mixing\u2026" : "The ending")));
       if (ep.sign_off_after != null) {
         const after = h("input", {
@@ -357,9 +360,13 @@ export function mountReview(container, initialEp, ctx) {
           if (!audio.paused) audio.pause();
           player.play().catch(() => {});
         }
+        const breaks = (info.breaks || []).map((x, k) => `break ${k + 1} at ${fmtTime(x.starts_at)}`
+          + (x.chapter ? ` (into \u201c${x.chapter}\u201d, ${x.in_finished_file} in the finished file)` : ""));
         add(box, [player, h("p", { class: "small muted" }, sectionDraft.which === "ending"
           ? `The ending: ${info.from_text}\u2013${info.to_text} of the finished file. The talk ends ${fmtDur(info.talk_ends_at || 0)} in; then the sign-off over the music.`
-          : `The opening: the first ${fmtDur(info.to - info.from || 0)} of the finished file. The talk starts ${fmtDur(info.talk_starts_at || 0)} in.`)]);
+          : sectionDraft.which === "breaks"
+            ? `Every music break, one after another, with a few seconds of talk either side: ${breaks.join("; ") || "one break"}.`
+            : `The opening: the first ${fmtDur(info.to - info.from || 0)} of the finished file. The talk starts ${fmtDur(info.talk_starts_at || 0)} in.`)]);
       }
     };
     draw();
